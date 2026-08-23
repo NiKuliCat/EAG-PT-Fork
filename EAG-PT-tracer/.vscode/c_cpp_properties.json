@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            // this file is used by C/C++ extension in vscode to find header files
+            "includePath": [
+                // workspace, including optix
+                // "${workspaceFolder}/**",
+                "/cpfs/user/yangxijie/_eagpt/EAG-PT-tracer/eag_pt_tracer_optix/external/optix",
+                "/cpfs/user/yangxijie/_eagpt/EAG-PT-tracer/eag_pt_tracer_optix/header",
+                // torch/extension.h
+                "/cpfs/user/yangxijie/mc3/envs/EAG-PT/lib/python3.11/site-packages/torch/include/",
+                "/cpfs/user/yangxijie/mc3/envs/EAG-PT/lib/python3.11/site-packages/torch/include/torch/csrc/api/include/",
+                "/cpfs/user/yangxijie/mc3/envs/EAG-PT/include/python3.11/",
+                // cuda
+                "/usr/local/cuda-11.8/include/"
+            ]
+        }
+    ],
+    "version": 4
+}
