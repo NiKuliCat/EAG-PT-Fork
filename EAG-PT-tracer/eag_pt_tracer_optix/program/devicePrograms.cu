@@ -421,8 +421,8 @@ namespace osc
         packPointer(&per_ray_data, u0, u1);
 
         int hitcount;
-        float alpha, distance, roughness, metallic;
-        float3 normal, radiance, emissive_dummy, basecolor;
+        float alpha, distance, emissive_dummy, roughness, metallic;
+        float3 normal, radiance, basecolor;
         trace_forth_with_material(
             optixLaunchParams.rays_origins[i_pixel],
             optixLaunchParams.rays_directions[i_pixel],
