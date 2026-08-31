@@ -143,7 +143,7 @@ namespace osc
   void SampleRenderer::createRaygenPrograms()
   {
     // should change to the count of raygen programs
-    raygenPGs.resize(5);
+    raygenPGs.resize(7);
 
     OptixProgramGroupOptions pgOptions_nobounce = {};
     OptixProgramGroupDesc pgDesc_nobounce = {};
@@ -163,6 +163,12 @@ namespace osc
     pgDesc_pathtracing.raygen.module = module;
     pgDesc_pathtracing.raygen.entryFunctionName = "__raygen__pathtracing";
 
+    OptixProgramGroupOptions pgOptions_materialpass = {};
+    OptixProgramGroupDesc pgDesc_materialpass = {};
+    pgDesc_materialpass.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    pgDesc_materialpass.raygen.module = module;
+    pgDesc_materialpass.raygen.entryFunctionName = "__raygen__materialpass";
+
     OptixProgramGroupOptions pgOptions_nobounce_backward = {};
     OptixProgramGroupDesc pgDesc_nobounce_backward = {};
     pgDesc_nobounce_backward.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
@@ -174,6 +180,12 @@ namespace osc
     pgDesc_singlebounce_backward.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     pgDesc_singlebounce_backward.raygen.module = module;
     pgDesc_singlebounce_backward.raygen.entryFunctionName = "__raygen__singlebounce_backward";
+
+    OptixProgramGroupOptions pgOptions_materialpass_backward = {};
+    OptixProgramGroupDesc pgDesc_materialpass_backward = {};
+    pgDesc_materialpass_backward.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    pgDesc_materialpass_backward.raygen.module = module;
+    pgDesc_materialpass_backward.raygen.entryFunctionName = "__raygen__materialpass_backward";
 
     // OptixProgramGroup raypg;
     char log[2048];
@@ -199,6 +211,12 @@ namespace osc
                                         &pgOptions_pathtracing,
                                         log, &sizeof_log,
                                         &raygenPGs[2]));
+    OPTIX_CHECK(optixProgramGroupCreate(optixContext,
+                                        &pgDesc_materialpass,
+                                        1,
+                                        &pgOptions_materialpass,
+                                        log, &sizeof_log,
+                                        &raygenPGs[5]));
 
     // [backward]
 
@@ -214,6 +232,12 @@ namespace osc
                                         &pgOptions_singlebounce_backward,
                                         log, &sizeof_log,
                                         &raygenPGs[4]));
+    OPTIX_CHECK(optixProgramGroupCreate(optixContext,
+                                        &pgDesc_materialpass_backward,
+                                        1,
+                                        &pgOptions_materialpass_backward,
+                                        log, &sizeof_log,
+                                        &raygenPGs[6]));
 
     if (sizeof_log > 1)
       PRINT(log);
@@ -601,6 +625,8 @@ namespace osc
     launchParams.surfels_radiances = reinterpret_cast<const float3 *>(ptr_surfels_radiances);
     launchParams.surfels_emissives = reinterpret_cast<const float *>(ptr_surfels_emissives);
     launchParams.surfels_albedos = reinterpret_cast<const float3 *>(ptr_surfels_albedos);
+    launchParams.surfels_roughnesses = nullptr;
+    launchParams.surfels_metallics = nullptr;
 
     // [input - rays]
 
@@ -662,6 +688,8 @@ namespace osc
       uintptr_t ptr_surfels_radiances,
       uintptr_t ptr_surfels_emissives,
       uintptr_t ptr_surfels_albedos,
+      uintptr_t ptr_surfels_roughnesses,
+      uintptr_t ptr_surfels_metallics,
       // values end
       // [input - rays]
       uintptr_t ptr_rays_origins,
@@ -693,6 +721,8 @@ namespace osc
     launchParams.surfels_radiances = reinterpret_cast<const float3 *>(ptr_surfels_radiances);
     launchParams.surfels_emissives = reinterpret_cast<const float *>(ptr_surfels_emissives);
     launchParams.surfels_albedos = reinterpret_cast<const float3 *>(ptr_surfels_albedos);
+    launchParams.surfels_roughnesses = reinterpret_cast<const float *>(ptr_surfels_roughnesses);
+    launchParams.surfels_metallics = reinterpret_cast<const float *>(ptr_surfels_metallics);
 
     // [input - rays]
 
@@ -732,6 +762,86 @@ namespace osc
     // [complete this round of launch]
   }
 
+  void SampleRenderer::materialpass(
+      int HEIGHT, int WIDTH,
+      uintptr_t ptr_surfels_positions,
+      uintptr_t ptr_surfels_scales,
+      uintptr_t ptr_surfels_quaternions,
+      uintptr_t ptr_surfels_opacities,
+      uintptr_t ptr_surfels_albedos,
+      uintptr_t ptr_surfels_roughnesses,
+      uintptr_t ptr_surfels_metallics,
+      uintptr_t ptr_rays_origins,
+      uintptr_t ptr_rays_directions,
+      uintptr_t ptr_pixels_basecolors,
+      uintptr_t ptr_pixels_roughnesses,
+      uintptr_t ptr_pixels_metallics)
+  {
+    const int chosen_raygen_program = 5;
+    sbt.raygenRecord = raygenRecordsBuffer.d_pointer() + chosen_raygen_program * sizeof(RaygenRecord);
+    launchParams.HEIGHT = HEIGHT;
+    launchParams.WIDTH = WIDTH;
+    launchParams.surfels_positions = reinterpret_cast<const float3 *>(ptr_surfels_positions);
+    launchParams.surfels_scales = reinterpret_cast<const float2 *>(ptr_surfels_scales);
+    launchParams.surfels_quaternions = reinterpret_cast<const float4 *>(ptr_surfels_quaternions);
+    launchParams.surfels_opacities = reinterpret_cast<const float *>(ptr_surfels_opacities);
+    launchParams.surfels_albedos = reinterpret_cast<const float3 *>(ptr_surfels_albedos);
+    launchParams.surfels_roughnesses = reinterpret_cast<const float *>(ptr_surfels_roughnesses);
+    launchParams.surfels_metallics = reinterpret_cast<const float *>(ptr_surfels_metallics);
+    launchParams.rays_origins = reinterpret_cast<const float3 *>(ptr_rays_origins);
+    launchParams.rays_directions = reinterpret_cast<const float3 *>(ptr_rays_directions);
+    launchParams.pixels_basecolors = reinterpret_cast<float3 *>(ptr_pixels_basecolors);
+    launchParams.pixels_roughnesses = reinterpret_cast<float *>(ptr_pixels_roughnesses);
+    launchParams.pixels_metallics = reinterpret_cast<float *>(ptr_pixels_metallics);
+    launchParamsBuffer.upload(&launchParams, 1);
+    OPTIX_CHECK(optixLaunch(pipeline, stream, launchParamsBuffer.d_pointer(),
+                            launchParamsBuffer.sizeInBytes, &sbt, WIDTH, HEIGHT, 1));
+    CUDA_SYNC_CHECK();
+  }
+
+  void SampleRenderer::materialpass_backward(
+      int HEIGHT, int WIDTH,
+      uintptr_t ptr_surfels_positions,
+      uintptr_t ptr_surfels_scales,
+      uintptr_t ptr_surfels_quaternions,
+      uintptr_t ptr_surfels_opacities,
+      uintptr_t ptr_surfels_albedos,
+      uintptr_t ptr_surfels_roughnesses,
+      uintptr_t ptr_surfels_metallics,
+      uintptr_t ptr_rays_origins,
+      uintptr_t ptr_rays_directions,
+      uintptr_t ptr_d_L_d_pixels_basecolors,
+      uintptr_t ptr_d_L_d_pixels_roughnesses,
+      uintptr_t ptr_d_L_d_pixels_metallics,
+      uintptr_t ptr_d_L_d_surfels_albedos,
+      uintptr_t ptr_d_L_d_surfels_roughnesses,
+      uintptr_t ptr_d_L_d_surfels_metallics)
+  {
+    const int chosen_raygen_program = 6;
+    sbt.raygenRecord = raygenRecordsBuffer.d_pointer() + chosen_raygen_program * sizeof(RaygenRecord);
+    launchParams.HEIGHT = HEIGHT;
+    launchParams.WIDTH = WIDTH;
+    launchParams.surfels_positions = reinterpret_cast<const float3 *>(ptr_surfels_positions);
+    launchParams.surfels_scales = reinterpret_cast<const float2 *>(ptr_surfels_scales);
+    launchParams.surfels_quaternions = reinterpret_cast<const float4 *>(ptr_surfels_quaternions);
+    launchParams.surfels_opacities = reinterpret_cast<const float *>(ptr_surfels_opacities);
+    launchParams.surfels_albedos = reinterpret_cast<const float3 *>(ptr_surfels_albedos);
+    launchParams.surfels_roughnesses = reinterpret_cast<const float *>(ptr_surfels_roughnesses);
+    launchParams.surfels_metallics = reinterpret_cast<const float *>(ptr_surfels_metallics);
+    launchParams.rays_origins = reinterpret_cast<const float3 *>(ptr_rays_origins);
+    launchParams.rays_directions = reinterpret_cast<const float3 *>(ptr_rays_directions);
+    launchParams.d_L_d_pixels_basecolors = reinterpret_cast<const float3 *>(ptr_d_L_d_pixels_basecolors);
+    launchParams.d_L_d_pixels_roughnesses = reinterpret_cast<const float *>(ptr_d_L_d_pixels_roughnesses);
+    launchParams.d_L_d_pixels_metallics = reinterpret_cast<const float *>(ptr_d_L_d_pixels_metallics);
+    launchParams.d_L_d_surfels_albedos = reinterpret_cast<float3 *>(ptr_d_L_d_surfels_albedos);
+    launchParams.d_L_d_surfels_roughnesses = reinterpret_cast<float *>(ptr_d_L_d_surfels_roughnesses);
+    launchParams.d_L_d_surfels_metallics = reinterpret_cast<float *>(ptr_d_L_d_surfels_metallics);
+    launchParamsBuffer.upload(&launchParams, 1);
+    OPTIX_CHECK(optixLaunch(pipeline, stream, launchParamsBuffer.d_pointer(),
+                            launchParamsBuffer.sizeInBytes, &sbt, WIDTH, HEIGHT, 1));
+    CUDA_SYNC_CHECK();
+  }
+
   void SampleRenderer::pathtracing(
       // [numbers]
       int HEIGHT,
@@ -747,6 +857,8 @@ namespace osc
       uintptr_t ptr_surfels_radiances,
       uintptr_t ptr_surfels_emissives,
       uintptr_t ptr_surfels_albedos,
+      uintptr_t ptr_surfels_roughnesses,
+      uintptr_t ptr_surfels_metallics,
       // values end
       // [input - rays]
       uintptr_t ptr_rays_origins,
@@ -777,6 +889,8 @@ namespace osc
     launchParams.surfels_radiances = reinterpret_cast<const float3 *>(ptr_surfels_radiances);
     launchParams.surfels_emissives = reinterpret_cast<const float *>(ptr_surfels_emissives);
     launchParams.surfels_albedos = reinterpret_cast<const float3 *>(ptr_surfels_albedos);
+    launchParams.surfels_roughnesses = reinterpret_cast<const float *>(ptr_surfels_roughnesses);
+    launchParams.surfels_metallics = reinterpret_cast<const float *>(ptr_surfels_metallics);
 
     // [input - rays]
 

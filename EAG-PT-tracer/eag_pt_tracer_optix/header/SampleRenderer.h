@@ -66,6 +66,8 @@ namespace osc
             uintptr_t ptr_surfels_radiances,
             uintptr_t ptr_surfels_emissives,
             uintptr_t ptr_surfels_albedos,
+            uintptr_t ptr_surfels_roughnesses,
+            uintptr_t ptr_surfels_metallics,
             // values end
             // [input - rays]
             uintptr_t ptr_rays_origins,
@@ -74,6 +76,41 @@ namespace osc
             uintptr_t ptr_pixels_albedos,
             uintptr_t ptr_pixels_rendering_radiances,
             uintptr_t ptr_d_pixels_rendering_radiances_d_P);
+
+        void materialpass(
+            int HEIGHT,
+            int WIDTH,
+            uintptr_t ptr_surfels_positions,
+            uintptr_t ptr_surfels_scales,
+            uintptr_t ptr_surfels_quaternions,
+            uintptr_t ptr_surfels_opacities,
+            uintptr_t ptr_surfels_albedos,
+            uintptr_t ptr_surfels_roughnesses,
+            uintptr_t ptr_surfels_metallics,
+            uintptr_t ptr_rays_origins,
+            uintptr_t ptr_rays_directions,
+            uintptr_t ptr_pixels_basecolors,
+            uintptr_t ptr_pixels_roughnesses,
+            uintptr_t ptr_pixels_metallics);
+
+        void materialpass_backward(
+            int HEIGHT,
+            int WIDTH,
+            uintptr_t ptr_surfels_positions,
+            uintptr_t ptr_surfels_scales,
+            uintptr_t ptr_surfels_quaternions,
+            uintptr_t ptr_surfels_opacities,
+            uintptr_t ptr_surfels_albedos,
+            uintptr_t ptr_surfels_roughnesses,
+            uintptr_t ptr_surfels_metallics,
+            uintptr_t ptr_rays_origins,
+            uintptr_t ptr_rays_directions,
+            uintptr_t ptr_d_L_d_pixels_basecolors,
+            uintptr_t ptr_d_L_d_pixels_roughnesses,
+            uintptr_t ptr_d_L_d_pixels_metallics,
+            uintptr_t ptr_d_L_d_surfels_albedos,
+            uintptr_t ptr_d_L_d_surfels_roughnesses,
+            uintptr_t ptr_d_L_d_surfels_metallics);
 
         void pathtracing(
             // [numbers]
@@ -90,6 +127,8 @@ namespace osc
             uintptr_t ptr_surfels_radiances,
             uintptr_t ptr_surfels_emissives,
             uintptr_t ptr_surfels_albedos,
+            uintptr_t ptr_surfels_roughnesses,
+            uintptr_t ptr_surfels_metallics,
             // [input - rays]
             uintptr_t ptr_rays_origins,
             uintptr_t ptr_rays_directions,

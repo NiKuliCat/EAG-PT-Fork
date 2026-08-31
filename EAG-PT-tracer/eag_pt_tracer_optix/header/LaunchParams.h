@@ -29,6 +29,8 @@ namespace osc
         const float3 *surfels_radiances;
         const float *surfels_emissives;
         const float3 *surfels_albedos;
+        const float *surfels_roughnesses;
+        const float *surfels_metallics;
         // values end
 
         // [input - emissive sampling]
@@ -53,6 +55,9 @@ namespace osc
         float3 *pixels_radiances;
         float *pixels_emissives;
         float3 *pixels_albedos;
+        float3 *pixels_basecolors;
+        float *pixels_roughnesses;
+        float *pixels_metallics;
         // values end
         float3 *pixels_rendering_radiances;
         float3 *pixels_d_rendering_radiances_d_P;
@@ -91,5 +96,10 @@ namespace osc
         // [backward output - single bounce]
 
         float3 *d_L_d_surfels_albedos;
+        const float3 *d_L_d_pixels_basecolors;
+        const float *d_L_d_pixels_roughnesses;
+        const float *d_L_d_pixels_metallics;
+        float *d_L_d_surfels_roughnesses;
+        float *d_L_d_surfels_metallics;
     };
 } // ::osc

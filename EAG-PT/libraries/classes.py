@@ -329,9 +329,137 @@ def Differentiable_EAG_OptiX_singlebounce(
         surfels.radiances,
         surfels.emissives,
         surfels.albedos,
+        surfels.roughnesses,
+        surfels.metallics,
     )
     return pixels_rendering_radiances, duration
 
+
+@torch.no_grad()
+def EAG_OptiX_materialpass(
+    camera: EAGCamera,
+    sample_renderer: eag_pt_tracer_optix.SampleRenderer,
+    surfels: EmissionAwareGaussians,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    rays = camera.generateRays()
+    count = camera.image_height * camera.image_width
+    basecolor = torch.zeros((count, 3), dtype=torch.float32, device="cuda")
+    roughness = torch.zeros((count, 1), dtype=torch.float32, device="cuda")
+    metallic = torch.zeros((count, 1), dtype=torch.float32, device="cuda")
+    sample_renderer.materialpass(
+        camera.image_height,
+        camera.image_width,
+        surfels.positions.contiguous().data_ptr(),
+        surfels.scales.contiguous().data_ptr(),
+        surfels.quaternions.contiguous().data_ptr(),
+        surfels.opacities.contiguous().data_ptr(),
+        surfels.albedos.contiguous().data_ptr(),
+        surfels.roughnesses.contiguous().data_ptr(),
+        surfels.metallics.contiguous().data_ptr(),
+        rays.origins.contiguous().data_ptr(),
+        rays.directions.contiguous().data_ptr(),
+        basecolor.contiguous().data_ptr(),
+        roughness.contiguous().data_ptr(),
+        metallic.contiguous().data_ptr(),
+    )
+    shape = (camera.image_height, camera.image_width)
+    return (
+        basecolor.reshape(shape[0], shape[1], 3).permute(2, 0, 1),
+        roughness.reshape(shape[0], shape[1], 1).permute(2, 0, 1),
+        metallic.reshape(shape[0], shape[1], 1).permute(2, 0, 1),
+    )
+
+
+
+class EAG_OptiX_materialpass(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        camera,
+        sample_renderer,
+        surfels_positions,
+        surfels_scales,
+        surfels_quaternions,
+        surfels_opacities,
+        surfels_albedos,
+        surfels_roughnesses,
+        surfels_metallics,
+    ):
+        rays = camera.generateRays()
+        count = camera.image_height * camera.image_width
+        basecolor = torch.zeros((count, 3), dtype=torch.float32, device="cuda")
+        roughness = torch.zeros((count, 1), dtype=torch.float32, device="cuda")
+        metallic = torch.zeros((count, 1), dtype=torch.float32, device="cuda")
+        sample_renderer.materialpass(
+            camera.image_height, camera.image_width,
+            surfels_positions.contiguous().data_ptr(),
+            surfels_scales.contiguous().data_ptr(),
+            surfels_quaternions.contiguous().data_ptr(),
+            surfels_opacities.contiguous().data_ptr(),
+            surfels_albedos.contiguous().data_ptr(),
+            surfels_roughnesses.contiguous().data_ptr(),
+            surfels_metallics.contiguous().data_ptr(),
+            rays.origins.contiguous().data_ptr(),
+            rays.directions.contiguous().data_ptr(),
+            basecolor.contiguous().data_ptr(),
+            roughness.contiguous().data_ptr(),
+            metallic.contiguous().data_ptr(),
+        )
+        ctx.camera = camera
+        ctx.sample_renderer = sample_renderer
+        ctx.save_for_backward(
+            surfels_positions, surfels_scales, surfels_quaternions,
+            surfels_opacities, surfels_albedos, surfels_roughnesses,
+            surfels_metallics, rays.origins, rays.directions,
+        )
+        return basecolor, roughness, metallic
+
+    @staticmethod
+    def backward(ctx, d_basecolor, d_roughness, d_metallic):
+        (
+            positions, scales, quaternions, opacities, albedos,
+            roughnesses, metallics, rays_origins, rays_directions,
+        ) = ctx.saved_tensors
+        da = torch.zeros_like(albedos)
+        dr = torch.zeros_like(roughnesses)
+        dm = torch.zeros_like(metallics)
+        if d_basecolor is None:
+            d_basecolor = torch.zeros((ctx.camera.image_height * ctx.camera.image_width, 3), device="cuda")
+        if d_roughness is None:
+            d_roughness = torch.zeros((ctx.camera.image_height * ctx.camera.image_width, 1), device="cuda")
+        if d_metallic is None:
+            d_metallic = torch.zeros((ctx.camera.image_height * ctx.camera.image_width, 1), device="cuda")
+        ctx.sample_renderer.materialpass_backward(
+            ctx.camera.image_height, ctx.camera.image_width,
+            positions.contiguous().data_ptr(), scales.contiguous().data_ptr(),
+            quaternions.contiguous().data_ptr(), opacities.contiguous().data_ptr(),
+            albedos.contiguous().data_ptr(), roughnesses.contiguous().data_ptr(),
+            metallics.contiguous().data_ptr(), rays_origins.contiguous().data_ptr(),
+            rays_directions.contiguous().data_ptr(),
+            d_basecolor.contiguous().data_ptr(),
+            d_roughness.contiguous().data_ptr(),
+            d_metallic.contiguous().data_ptr(),
+            da.contiguous().data_ptr(), dr.contiguous().data_ptr(),
+            dm.contiguous().data_ptr(),
+        )
+        return (None, None, None, None, None, None, da, dr, dm)
+
+
+def Differentiable_EAG_OptiX_materialpass(
+    camera, sample_renderer, surfels
+):
+    basecolor, roughness, metallic = EAG_OptiX_materialpass.apply(
+        camera, sample_renderer,
+        surfels.positions, surfels.scales, surfels.quaternions,
+        surfels.opacities, surfels.albedos, surfels.roughnesses,
+        surfels.metallics,
+    )
+    shape = (camera.image_height, camera.image_width)
+    return (
+        basecolor.reshape(shape[0], shape[1], 3).permute(2, 0, 1),
+        roughness.reshape(shape[0], shape[1], 1).permute(2, 0, 1),
+        metallic.reshape(shape[0], shape[1], 1).permute(2, 0, 1),
+    )
 
 class EAG_OptiX_singlebounce(torch.autograd.Function):
 
@@ -348,6 +476,8 @@ class EAG_OptiX_singlebounce(torch.autograd.Function):
         surfels_radiances: torch.Tensor,
         surfels_emissives: torch.Tensor,
         surfels_albedos: torch.Tensor,
+        surfels_roughnesses: torch.Tensor,
+        surfels_metallics: torch.Tensor,
     ):
 
         camera_image_height = camera.image_height
@@ -386,6 +516,8 @@ class EAG_OptiX_singlebounce(torch.autograd.Function):
             surfels_radiances.contiguous().data_ptr(),
             surfels_emissives.contiguous().data_ptr(),
             surfels_albedos.contiguous().data_ptr(),
+            surfels_roughnesses.contiguous().data_ptr(),
+            surfels_metallics.contiguous().data_ptr(),
             # [input - rays]
             rays_origins.contiguous().data_ptr(),
             rays_directions.contiguous().data_ptr(),
@@ -508,6 +640,8 @@ class EAG_OptiX_singlebounce(torch.autograd.Function):
             None,  # surfels_radiances: torch.Tensor
             None,  # surfels_emissives: torch.Tensor
             d_L_d_surfels_albedos,  # surfels_albedos: torch.Tensor
+            None,  # surfels_roughnesses: torch.Tensor
+            None,  # surfels_metallics: torch.Tensor
         )
 
 
@@ -565,10 +699,11 @@ class EAGNvsDataset:
             #     )
             # )
             # [EFT]
+            image_dir = "Image" if tracer_config.PBR_ENABLED else "Radiance-exr"
             image_radiance_rgb_linear_premultiplied: torch.Tensor = (
                 UTILITIES_IO.ReadExrImage(
                     transforms_json_path.parent
-                    / f"Radiance-exr/{frame['file_name']}.exr"
+                    / f"{image_dir}/{frame['file_name']}.exr"
                 )
             )
 
@@ -659,7 +794,7 @@ class EAGNvsDataset:
 
             possible_labeled_emissive_path = (
                 transforms_json_path.parent
-                / "Emissive-exr"
+                / ("Emit" if tracer_config.PBR_ENABLED else "Emissive-exr")
                 / f"{frame['file_name']}.exr"
             )
             if possible_labeled_emissive_path.exists():
@@ -675,24 +810,52 @@ class EAGNvsDataset:
 
             # [load image_normal and image_depth]
 
+            normal_dir = "Normal" if tracer_config.PBR_ENABLED else "Normal-exr"
             image_normal = UTILITIES_IO.ReadExrNormalFromBlender(
-                transforms_json_path.parent / f"Normal-exr/{frame['file_name']}.exr"
+                transforms_json_path.parent / f"{normal_dir}/{frame['file_name']}.exr"
             )
             camera.gt_image_normal = image_normal.cpu()
 
             if tracer_config.DATASET_IS_SYNTHETIC:
 
+                depth_dir = "Depth" if tracer_config.PBR_ENABLED else "Depth-exr"
                 image_depth = UTILITIES_IO.ReadExrDepthFromBlender(
-                    transforms_json_path.parent / f"Depth-exr/{frame['file_name']}.exr"
+                    transforms_json_path.parent / f"{depth_dir}/{frame['file_name']}.exr"
                 )
                 camera.gt_image_depth = image_depth.cpu()
 
-                # [load image_albedo]
+                if not tracer_config.PBR_ENABLED:
+                    # Legacy synthetic datasets expose DiffCol.
+                    image_albedo = UTILITIES_IO.ReadExrDepthFromBlender(
+                        transforms_json_path.parent / f"DiffCol/{frame['file_name']}.exr"
+                    )[:3]
+                    camera.gt_image_albedo = image_albedo.cpu()
 
-                image_albedo = UTILITIES_IO.ReadExrDepthFromBlender(
-                    transforms_json_path.parent / f"DiffCol/{frame['file_name']}.exr"
-                )[:3]
-                camera.gt_image_albedo = image_albedo.cpu()
+            if tracer_config.PBR_ENABLED:
+                pbr_root = transforms_json_path.parent
+                required_pbr_paths = {
+                    "Emit": pbr_root / f"Emit/{frame['file_name']}.exr",
+                    "BaseColor": pbr_root / f"BaseColor/{frame['file_name']}.exr",
+                    "Metallic": pbr_root / f"Metallic/{frame['file_name']}.exr",
+                    "Roughness": pbr_root / f"Roughness/{frame['file_name']}.exr",
+                }
+                missing = [str(p) for p in required_pbr_paths.values() if not p.exists()]
+                if missing:
+                    raise FileNotFoundError(
+                        "PBR_ENABLED requires AOV files: " + ", ".join(missing)
+                    )
+                camera.gt_image_emission_rgb = UTILITIES_IO.ReadExrImage(
+                    required_pbr_paths["Emit"]
+                ).cpu()
+                camera.gt_image_basecolor = UTILITIES_IO.ReadExrImage(
+                    required_pbr_paths["BaseColor"]
+                ).cpu()
+                camera.gt_image_metallic = UTILITIES_IO.ReadExrDepthFromBlender(
+                    required_pbr_paths["Metallic"]
+                )[:1].cpu()
+                camera.gt_image_roughness = UTILITIES_IO.ReadExrDepthFromBlender(
+                    required_pbr_paths["Roughness"]
+                )[:1].cpu()
 
             # [load gt alpha]
 
@@ -751,6 +914,20 @@ class EAGNvsDataset:
                     align_corners=False,
                     antialias=True,
                 ).squeeze(0)
+            for attr in ("gt_image_emission_rgb", "gt_image_basecolor", "gt_image_metallic", "gt_image_roughness"):
+                value = getattr(camera, attr, None)
+                if value is not None:
+                    setattr(
+                        camera,
+                        attr,
+                        F.interpolate(
+                            value.unsqueeze(0),
+                            scale_factor=1.0 / tracer_config.DOWN_SAMPLE_SCALE_WHEN_LOADING_DATA,
+                            mode="bilinear",
+                            align_corners=False,
+                            antialias=True,
+                        ).squeeze(0),
+                    )
             camera.gt_image_normal = F.interpolate(
                 camera.gt_image_normal.unsqueeze(0),
                 scale_factor=1.0 / tracer_config.DOWN_SAMPLE_SCALE_WHEN_LOADING_DATA,
@@ -889,6 +1066,11 @@ class EAGCamera:
         self.gt_image_alpha: torch.Tensor | None = None
 
         self.gt_image_emissive: torch.Tensor | None = None
+
+        self.gt_image_emission_rgb: torch.Tensor | None = None
+        self.gt_image_basecolor: torch.Tensor | None = None
+        self.gt_image_metallic: torch.Tensor | None = None
+        self.gt_image_roughness: torch.Tensor | None = None
 
         self.gt_image_albedo: torch.Tensor | None = None
 
@@ -1162,6 +1344,15 @@ class EmissionAwareGaussians:
             )
         )
 
+        if "roughnesses" in points.data.dtype.names:
+            gsply_roughnesses = np.column_stack((points["roughnesses"],))
+        else:
+            gsply_roughnesses = np.full((points.count, 1), 0.5, dtype=np.float32)
+        if "metallics" in points.data.dtype.names:
+            gsply_metallics = np.column_stack((points["metallics"],))
+        else:
+            gsply_metallics = np.zeros((points.count, 1), dtype=np.float32)
+
         return EmissionAwareGaussians(
             count=points.count,
             positions=torch.tensor(gsply_positions, dtype=torch.float32),
@@ -1171,6 +1362,8 @@ class EmissionAwareGaussians:
             radiances=torch.tensor(gsply_sh0s, dtype=torch.float32),
             emissives=torch.tensor(gsply_emissives, dtype=torch.float32),
             albedos=torch.tensor(gsply_albedos, dtype=torch.float32),
+            roughnesses=torch.tensor(gsply_roughnesses, dtype=torch.float32),
+            metallics=torch.tensor(gsply_metallics, dtype=torch.float32),
         )
 
     def GetGaussiansTangentAndNormalVectors(
@@ -1273,6 +1466,8 @@ class EmissionAwareGaussians:
             radiances=torch.tensor(pc_rgbs),
             emissives=torch.ones((points.count, 1), dtype=torch.float32) * 0.1,
             albedos=torch.ones((points.count, 3), dtype=torch.float32) * 0.25,
+            roughnesses=torch.ones((points.count, 1), dtype=torch.float32) * 0.5,
+            metallics=torch.zeros((points.count, 1), dtype=torch.float32),
         )
 
     def __init__(
@@ -1285,6 +1480,8 @@ class EmissionAwareGaussians:
         radiances: torch.Tensor,
         emissives: torch.Tensor,
         albedos: torch.Tensor,
+        roughnesses: torch.Tensor | None = None,
+        metallics: torch.Tensor | None = None,
     ) -> None:
         # count of 2D Gaussians, row count of properties
         self.count: int = count
@@ -1309,6 +1506,17 @@ class EmissionAwareGaussians:
         # (n, 3)
         self.albedos: torch.Tensor = albedos
 
+        self.roughnesses: torch.Tensor = (
+            roughnesses
+            if roughnesses is not None
+            else torch.ones((count, 1), dtype=albedos.dtype, device=albedos.device) * 0.5
+        )
+        self.metallics: torch.Tensor = (
+            metallics
+            if metallics is not None
+            else torch.zeros((count, 1), dtype=albedos.dtype, device=albedos.device)
+        )
+
     def filter(self, mask_bool: torch.Tensor) -> EmissionAwareGaussians:
         return EmissionAwareGaussians(
             count=mask_bool.sum().item(),
@@ -1319,6 +1527,8 @@ class EmissionAwareGaussians:
             radiances=self.radiances[mask_bool].clone(),
             emissives=self.emissives[mask_bool].clone(),
             albedos=self.albedos[mask_bool].clone(),
+            roughnesses=self.roughnesses[mask_bool].clone(),
+            metallics=self.metallics[mask_bool].clone(),
         )
 
     def merge(self, extra_gaussians: EmissionAwareGaussians) -> EmissionAwareGaussians:
@@ -1331,6 +1541,8 @@ class EmissionAwareGaussians:
             radiances=torch.cat([self.radiances, extra_gaussians.radiances]),
             emissives=torch.cat([self.emissives, extra_gaussians.emissives]),
             albedos=torch.cat([self.albedos, extra_gaussians.albedos]),
+            roughnesses=torch.cat([self.roughnesses, extra_gaussians.roughnesses]),
+            metallics=torch.cat([self.metallics, extra_gaussians.metallics]),
         )
 
     @torch.no_grad()
@@ -1394,6 +1606,8 @@ class EmissionAwareGaussians:
                 self.radiances.cpu().numpy(),
                 self.emissives.cpu().numpy(),
                 self.albedos.cpu().numpy(),
+                self.roughnesses.cpu().numpy(),
+                self.metallics.cpu().numpy(),
             ],
             axis=1,
         )
@@ -1425,6 +1639,7 @@ class EmissionAwareGaussians:
                 ("albedos_1", "f4"),
                 ("albedos_2", "f4"),
             ]
+            + [("roughnesses", "f4"), ("metallics", "f4")]
         )
 
         UTILITIES_IO.SavePlyUsingPlyfilePackage(
@@ -2315,6 +2530,8 @@ class EmissionAwareGaussians:
                     self.radiances.contiguous().data_ptr(),
                     self.emissives.contiguous().data_ptr(),
                     self.albedos.contiguous().data_ptr(),
+                    self.roughnesses.contiguous().data_ptr(),
+                    self.metallics.contiguous().data_ptr(),
                     # [input - rays]
                     rays.origins.contiguous().data_ptr(),
                     rays.directions.contiguous().data_ptr(),
@@ -2484,6 +2701,20 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
     def InverseActivationAlbedos(y: torch.Tensor) -> torch.Tensor:
         return torch.log(y / (1 - y))
 
+    def ActivationRoughnesses(x: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(x)
+
+    def InverseActivationRoughnesses(y: torch.Tensor) -> torch.Tensor:
+        y = y.clamp(1e-6, 1.0 - 1e-6)
+        return torch.log(y / (1 - y))
+
+    def ActivationMetallics(x: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(x)
+
+    def InverseActivationMetallics(y: torch.Tensor) -> torch.Tensor:
+        y = y.clamp(1e-6, 1.0 - 1e-6)
+        return torch.log(y / (1 - y))
+
     def __init__(
         self,
         gaussians: EmissionAwareGaussians,
@@ -2546,6 +2777,18 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
                 ),
                 requires_grad=True,
             )
+            self.parameters_roughnesses: torch.Tensor = torch.nn.Parameter(
+                LearnableEmissionAwareGaussians.InverseActivationRoughnesses(
+                    gaussians.roughnesses.clone()
+                ),
+                requires_grad=True,
+            )
+            self.parameters_metallics: torch.Tensor = torch.nn.Parameter(
+                LearnableEmissionAwareGaussians.InverseActivationMetallics(
+                    gaussians.metallics.clone()
+                ),
+                requires_grad=True,
+            )
 
     @property
     def positions(self) -> torch.Tensor:
@@ -2583,6 +2826,18 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
     def albedos(self) -> torch.Tensor:
         return LearnableEmissionAwareGaussians.ActivationAlbedos(
             self.parameters_albedos
+        )
+
+    @property
+    def roughnesses(self) -> torch.Tensor:
+        return LearnableEmissionAwareGaussians.ActivationRoughnesses(
+            self.parameters_roughnesses
+        )
+
+    @property
+    def metallics(self) -> torch.Tensor:
+        return LearnableEmissionAwareGaussians.ActivationMetallics(
+            self.parameters_metallics
         )
 
     def get_triangles_vertices_and_indices_for_optix_build_acceleration_structure(
@@ -2627,6 +2882,14 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
                 "params": [self.parameters_emissives],
                 "lr": tracer_config.LEARNING_RATE_EMISSIVE
                 * tracer_config.LEARNING_RATE_MULTIPLE,
+            },
+            {
+                "params": [self.parameters_roughnesses],
+                "lr": 0.0,
+            },
+            {
+                "params": [self.parameters_metallics],
+                "lr": 0.0,
             },
         ]
         optimizer = torch.optim.Adam(parameters, lr=0.0)
@@ -3129,6 +3392,52 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
             f.write(f"backward_durations = {record_backward_durations}\n")
         ExLog(f"Saved records at {record_file_path}.")
 
+    def optimizePbrMaterials(self, tracer_config: TracerConfig) -> None:
+        if not tracer_config.PBR_ENABLED:
+            raise ValueError("Set --PBR_ENABLED true for PBR material recovery.")
+        stage = int(tracer_config.PBR_STAGE)
+        if stage not in (1, 2):
+            raise ValueError("PBR_STAGE must be 1 (BaseColor/Roughness) or 2 (Metallic).")
+        params = [
+            {"params": [self.parameters_albedos],
+             "lr": tracer_config.LEARNING_RATE_ALBEDO if stage == 1 else 0.0},
+            {"params": [self.parameters_roughnesses],
+             "lr": tracer_config.LEARNING_RATE_ROUGHNESS if stage == 1 else 0.0},
+            {"params": [self.parameters_metallics],
+             "lr": tracer_config.LEARNING_RATE_METALLIC if stage == 2 else 0.0},
+        ]
+        optimizer = torch.optim.Adam(params, lr=0.0)
+        sample_renderer = eag_pt_tracer_optix.SampleRenderer()
+        vertices, indices = self.get_triangles_vertices_and_indices_for_optix_build_acceleration_structure()
+        sample_renderer.buildAccel(vertices.shape[0], vertices.contiguous().data_ptr(),
+                                    indices.shape[0], indices.contiguous().data_ptr())
+        for iteration in range(tracer_config.PBR_ITERATIONS):
+            camera = random.choice(self.nvs_dataset.train_set_cameras)
+            if camera.gt_image_basecolor is None:
+                raise RuntimeError("PBR dataset has no BaseColor AOV.")
+            pred_base, pred_rough, pred_metal = Differentiable_EAG_OptiX_materialpass(
+                camera, sample_renderer, self
+            )
+            mask = (camera.gt_image_depth.cuda() > 0).float() if camera.gt_image_depth is not None else torch.ones_like(pred_rough)
+            loss = torch.zeros((), device="cuda")
+            if stage == 1:
+                target_base = camera.gt_image_basecolor.cuda()
+                target_rough = camera.gt_image_roughness.cuda()
+                loss = (
+                    tracer_config.PBR_LAMBDA_BASECOLOR * F.smooth_l1_loss(pred_base * mask, target_base * mask)
+                    + tracer_config.PBR_LAMBDA_ROUGHNESS * F.smooth_l1_loss(pred_rough * mask, target_rough * mask)
+                )
+            else:
+                target_metal = camera.gt_image_metallic.cuda()
+                loss = tracer_config.PBR_LAMBDA_METALLIC * F.smooth_l1_loss(pred_metal * mask, target_metal * mask)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if iteration % 50 == 0:
+                ExLog(f"PBR stage {stage}, iter {iteration}, loss {loss.item():.6f}")
+        output_name = "optimized-2d-gaussians_pbr_ar.ply" if stage == 1 else "optimized-2d-gaussians_pbr_arm.ply"
+        self.toGaussians().savePly(tracer_config.OUTPUT_FOLDER_PATH / output_name)
+
     def toGaussians(self) -> EmissionAwareGaussians:
         positions = self.positions.clone().detach().requires_grad_(False)
         scales = self.scales.clone().detach().requires_grad_(False)
@@ -3137,6 +3446,8 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
         radiances = self.radiances.clone().detach().requires_grad_(False)
         emissives = self.emissives.clone().detach().requires_grad_(False)
         albedos = self.albedos.clone().detach().requires_grad_(False)
+        roughnesses = self.roughnesses.clone().detach().requires_grad_(False)
+        metallics = self.metallics.clone().detach().requires_grad_(False)
 
         if positions.isnan().sum() != 0:
             ExLog(f"{positions.isnan().sum()=}")
@@ -3150,6 +3461,8 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
         assert not radiances.isnan().any()
         assert not emissives.isnan().any()
         assert not albedos.isnan().any()
+        assert not roughnesses.isnan().any()
+        assert not metallics.isnan().any()
 
         return EmissionAwareGaussians(
             count=self.count,
@@ -3160,4 +3473,6 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
             radiances=radiances,
             emissives=emissives,
             albedos=albedos,
+            roughnesses=roughnesses,
+            metallics=metallics,
         )

@@ -56,7 +56,7 @@ namespace osc
 
     //------------------------------------------------------------------------------
 
-    __device__ void trace_forth(
+    __device__ void trace_forth_with_material(
         // [input]
 
         const float3 &ray_origin, const float3 &ray_direction,
@@ -75,7 +75,9 @@ namespace osc
 
         float3 &Radiance,
         float &Emissive,
-        float3 &Albedo)
+        float3 &Albedo,
+        float &Roughness,
+        float &Metallic)
     {
         // avoid surfels near camera
         float distance_to_start_tracing_ray = NEAREST_DISTANCE_TO_AVOID_FRONT_SURFELS;
@@ -91,6 +93,8 @@ namespace osc
         Radiance = make_float3(0.0f, 0.0f, 0.0f);
         Emissive = 0.0f;
         Albedo = make_float3(0.0f, 0.0f, 0.0f);
+        Roughness = 0.0f;
+        Metallic = 0.0f;
 
         // tracing (0-bounce) along the ray
         while (1)
@@ -168,6 +172,10 @@ namespace osc
                 Radiance += weight * optixLaunchParams.surfels_radiances[surfel_id];
                 Emissive += weight * optixLaunchParams.surfels_emissives[surfel_id];
                 Albedo += weight * optixLaunchParams.surfels_albedos[surfel_id];
+                if (optixLaunchParams.surfels_roughnesses != nullptr)
+                    Roughness += weight * optixLaunchParams.surfels_roughnesses[surfel_id];
+                if (optixLaunchParams.surfels_metallics != nullptr)
+                    Metallic += weight * optixLaunchParams.surfels_metallics[surfel_id];
 
                 // [accumulate end]
 
@@ -187,6 +195,18 @@ namespace osc
         }
 
         Alpha = 1.0f - Transmittance;
+    }
+
+    __device__ void trace_forth(
+        const float3 &ray_origin, const float3 &ray_direction,
+        PerRayData per_ray_data, uint32_t &per_ray_data_u0, uint32_t &per_ray_data_u1,
+        int &Hitcount, float &Alpha, float &Distance, float3 &Normal,
+        float3 &Radiance, float &Emissive, float3 &Albedo)
+    {
+        float roughness = 0.0f;
+        float metallic = 0.0f;
+        trace_forth_with_material(ray_origin, ray_direction, per_ray_data, per_ray_data_u0, per_ray_data_u1,
+            Hitcount, Alpha, Distance, Normal, Radiance, Emissive, Albedo, roughness, metallic);
     }
 
     __device__ void sample_upper_hemisphere_direction(
@@ -298,6 +318,123 @@ namespace osc
         optixLaunchParams.pixels_albedos[i_pixel] = camera_Albedo;
     }
 
+    extern "C" __global__ void __raygen__materialpass_backward()
+    {
+        const uint3 launchIndex = optixGetLaunchIndex();
+        const int i_pixel = launchIndex.y * optixLaunchParams.WIDTH + launchIndex.x;
+        PerRayData per_ray_data;
+        IntersectionInfo buffer[ANYHIT_CHUNK_BUFFER_SIZE];
+        per_ray_data.buffer = buffer;
+        uint32_t u0, u1;
+        packPointer(&per_ray_data, u0, u1);
+        const float3 ray_origin = optixLaunchParams.rays_origins[i_pixel];
+        const float3 ray_direction = optixLaunchParams.rays_directions[i_pixel];
+        const float3 d_base = optixLaunchParams.d_L_d_pixels_basecolors[i_pixel];
+        const float d_rough = optixLaunchParams.d_L_d_pixels_roughnesses[i_pixel];
+        const float d_metal = optixLaunchParams.d_L_d_pixels_metallics[i_pixel];
+        float tmin = NEAREST_DISTANCE_TO_AVOID_FRONT_SURFELS;
+        float transmittance = 1.0f;
+        while (true)
+        {
+            for (int i = 0; i < ANYHIT_CHUNK_BUFFER_SIZE; ++i)
+                per_ray_data.buffer[i].distance = SCENE_MAX_DISTANCE;
+            optixTrace(optixLaunchParams.traversable, ray_origin, ray_direction, tmin,
+                       SCENE_MAX_DISTANCE, 0.0f, OptixVisibilityMask(255),
+                       OPTIX_RAY_FLAG_NONE, 0, 0, 0, u0, u1);
+            bool ended = false;
+            for (int i = 0; i < ANYHIT_CHUNK_BUFFER_SIZE; ++i)
+            {
+                const float ray_distance = per_ray_data.buffer[i].distance;
+                if (ray_distance == SCENE_MAX_DISTANCE) { ended = true; break; }
+                const int id = per_ray_data.buffer[i].surfel_id;
+                const float2 uv = per_ray_data.buffer[i].surfel_uv;
+                const float eta = optixLaunchParams.surfels_opacities[id] *
+                                  expf(-0.5f * (uv.x * uv.x + uv.y * uv.y));
+                const float weight = transmittance * eta;
+                if (weight < 1.0e-6f) continue;
+                atomicAdd(&optixLaunchParams.d_L_d_surfels_albedos[id].x, d_base.x * weight);
+                atomicAdd(&optixLaunchParams.d_L_d_surfels_albedos[id].y, d_base.y * weight);
+                atomicAdd(&optixLaunchParams.d_L_d_surfels_albedos[id].z, d_base.z * weight);
+                atomicAdd(&optixLaunchParams.d_L_d_surfels_roughnesses[id], d_rough * weight);
+                atomicAdd(&optixLaunchParams.d_L_d_surfels_metallics[id], d_metal * weight);
+                transmittance *= (1.0f - eta);
+                if (transmittance < TRANSMITTANCE_THRESHOLD) { ended = true; break; }
+                tmin = ray_distance + MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION;
+            }
+            if (ended) break;
+            tmin = per_ray_data.buffer[ANYHIT_CHUNK_BUFFER_SIZE - 1].distance +
+                   MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION;
+        }
+    }
+
+    __device__ __forceinline__ float3 fresnel_schlick(float cos_theta, const float3 &f0)
+    {
+        float x = fmaxf(0.0f, 1.0f - cos_theta);
+        float factor = x * x * x * x * x;
+        return f0 + (make_float3(1.0f) - f0) * factor;
+    }
+
+    __device__ __forceinline__ float ggx_distribution(float NoH, float roughness)
+    {
+        float a = fmaxf(roughness * roughness, 0.0004f);
+        float a2 = a * a;
+        float denom = NoH * NoH * (a2 - 1.0f) + 1.0f;
+        return a2 / fmaxf(M_PIf * denom * denom, 1.0e-7f);
+    }
+
+    __device__ __forceinline__ float smith_g1(float NoV, float roughness)
+    {
+        float a = fmaxf(roughness * roughness, 0.0004f);
+        float k = a * 0.5f;
+        return NoV / fmaxf(NoV * (1.0f - k) + k, 1.0e-6f);
+    }
+
+    __device__ __forceinline__ float3 eval_disney_brdf(
+        const float3 &normal, const float3 &wi, const float3 &wo,
+        const float3 &basecolor, float metallic, float roughness)
+    {
+        float NoL = fmaxf(dot(normal, wi), 0.0f);
+        float NoV = fmaxf(dot(normal, wo), 0.0f);
+        if (NoL <= 0.0f || NoV <= 0.0f)
+            return make_float3(0.0f);
+        float3 h = normalize(wi + wo);
+        float NoH = fmaxf(dot(normal, h), 0.0f);
+        float VoH = fmaxf(dot(wo, h), 0.0f);
+        float3 f0 = make_float3(0.04f) * (1.0f - metallic) + basecolor * metallic;
+        float3 F = fresnel_schlick(VoH, f0);
+        float D = ggx_distribution(NoH, roughness);
+        float G = smith_g1(NoL, roughness) * smith_g1(NoV, roughness);
+        float3 kd = basecolor * (1.0f - metallic) / M_PIf;
+        float3 spec = F * (D * G / fmaxf(4.0f * NoL * NoV, 1.0e-6f));
+        return kd + spec;
+    }
+
+    extern "C" __global__ void __raygen__materialpass()
+    {
+        const uint3 launchIndex = optixGetLaunchIndex();
+        const int i_pixel = launchIndex.y * optixLaunchParams.WIDTH + launchIndex.x;
+
+        PerRayData per_ray_data;
+        IntersectionInfo buffer[ANYHIT_CHUNK_BUFFER_SIZE];
+        per_ray_data.buffer = buffer;
+        uint32_t u0, u1;
+        packPointer(&per_ray_data, u0, u1);
+
+        int hitcount;
+        float alpha, distance, roughness, metallic;
+        float3 normal, radiance, emissive_dummy, basecolor;
+        trace_forth_with_material(
+            optixLaunchParams.rays_origins[i_pixel],
+            optixLaunchParams.rays_directions[i_pixel],
+            per_ray_data, u0, u1,
+            hitcount, alpha, distance, normal, radiance, emissive_dummy,
+            basecolor, roughness, metallic);
+
+        optixLaunchParams.pixels_basecolors[i_pixel] = basecolor;
+        optixLaunchParams.pixels_roughnesses[i_pixel] = roughness;
+        optixLaunchParams.pixels_metallics[i_pixel] = metallic;
+    }
+
     extern "C" __global__ void __raygen__singlebounce()
     {
         // [get ids of the current thread]
@@ -342,11 +479,14 @@ namespace osc
         float3 camera_Radiance;
         float camera_Emissive;
         float3 camera_Albedo;
+        float camera_Roughness;
+        float camera_Metallic;
 
-        trace_forth(
+        trace_forth_with_material(
             camera_ray_origin, camera_ray_direction,
             per_ray_data, per_ray_data_u0, per_ray_data_u1,
-            camera_Hitcount, camera_Alpha, camera_Distance, camera_Normal, camera_Radiance, camera_Emissive, camera_Albedo);
+            camera_Hitcount, camera_Alpha, camera_Distance, camera_Normal, camera_Radiance, camera_Emissive, camera_Albedo,
+            camera_Roughness, camera_Metallic);
 
         // [save pixels_albedos for backward pass]
 
@@ -391,6 +531,8 @@ namespace osc
                 float3 intersection_Radiance = camera_Radiance;
                 float intersection_Emissive = camera_Emissive;
                 float3 intersection_Albedo = camera_Albedo;
+                float intersection_Roughness = camera_Roughness;
+                float intersection_Metallic = camera_Metallic;
 
                 // multiplication of albedos along the path
                 // calculate the currect intersected material
@@ -406,13 +548,17 @@ namespace osc
 
                     // previous: Albedo, Normal
                     // new: ray_direction_incident, probability
-                    path_throughput *= dot(intersection_Normal, ray_direction_incident) / probability;
+                    path_throughput *= eval_disney_brdf(
+                        intersection_Normal, ray_direction_incident, ray_direction_outgoing,
+                        intersection_Albedo, intersection_Metallic, intersection_Roughness)
+                        * dot(intersection_Normal, ray_direction_incident) / fmaxf(probability, 1.0e-6f);
 
                     // directly update the intersection values
-                    trace_forth(
+                    trace_forth_with_material(
                         ray_origin, ray_direction_incident,
                         per_ray_data, per_ray_data_u0, per_ray_data_u1,
-                        intersection_Hitcount, intersection_Alpha, intersection_Distance, intersection_Normal, intersection_Radiance, intersection_Emissive, intersection_Albedo);
+                        intersection_Hitcount, intersection_Alpha, intersection_Distance, intersection_Normal, intersection_Radiance, intersection_Emissive, intersection_Albedo,
+                        intersection_Roughness, intersection_Metallic);
 
                     // new: Emissive, Radiance
                     path_tracing_radiance += path_throughput * intersection_Radiance;
@@ -424,8 +570,8 @@ namespace osc
         }
 
         // return path tracing result
-        optixLaunchParams.pixels_rendering_radiances[i_pixel] = camera_Albedo / M_PIf * path_tracing_radiance;
-        optixLaunchParams.pixels_d_rendering_radiances_d_P[i_pixel] = M_PIf * path_tracing_radiance;
+        optixLaunchParams.pixels_rendering_radiances[i_pixel] = path_tracing_radiance;
+        optixLaunchParams.pixels_d_rendering_radiances_d_P[i_pixel] = path_tracing_radiance;
     }
 
     extern "C" __global__ void __raygen__pathtracing()
@@ -472,11 +618,14 @@ namespace osc
         float3 camera_Radiance;
         float camera_Emissive;
         float3 camera_Albedo;
+        float camera_Roughness;
+        float camera_Metallic;
 
-        trace_forth(
+        trace_forth_with_material(
             camera_ray_origin, camera_ray_direction,
             per_ray_data, per_ray_data_u0, per_ray_data_u1,
-            camera_Hitcount, camera_Alpha, camera_Distance, camera_Normal, camera_Radiance, camera_Emissive, camera_Albedo);
+            camera_Hitcount, camera_Alpha, camera_Distance, camera_Normal, camera_Radiance, camera_Emissive, camera_Albedo,
+            camera_Roughness, camera_Metallic);
 
         // [path tracing]
 
@@ -526,6 +675,8 @@ namespace osc
                 float3 intersection_Radiance = camera_Radiance;
                 float intersection_Emissive = camera_Emissive;
                 float3 intersection_Albedo = camera_Albedo;
+                float intersection_Roughness = camera_Roughness;
+                float intersection_Metallic = camera_Metallic;
 
                 // multiplication of albedos along the path
                 // calculate the currect intersected material
@@ -541,13 +692,17 @@ namespace osc
 
                     // previous: Albedo, Normal
                     // new: ray_direction_incident, probability
-                    path_throughput *= intersection_Albedo / M_PIf * dot(intersection_Normal, ray_direction_incident) / probability;
+                    path_throughput *= eval_disney_brdf(
+                        intersection_Normal, ray_direction_incident, ray_direction_outgoing,
+                        intersection_Albedo, intersection_Metallic, intersection_Roughness)
+                        * dot(intersection_Normal, ray_direction_incident) / fmaxf(probability, 1.0e-6f);
 
                     // directly update the intersection values
-                    trace_forth(
+                    trace_forth_with_material(
                         ray_origin, ray_direction_incident,
                         per_ray_data, per_ray_data_u0, per_ray_data_u1,
-                        intersection_Hitcount, intersection_Alpha, intersection_Distance, intersection_Normal, intersection_Radiance, intersection_Emissive, intersection_Albedo);
+                        intersection_Hitcount, intersection_Alpha, intersection_Distance, intersection_Normal, intersection_Radiance, intersection_Emissive, intersection_Albedo,
+                        intersection_Roughness, intersection_Metallic);
                     intersection_Normal = normalize(intersection_Normal);
 
                     // new: Emissive, Radiance

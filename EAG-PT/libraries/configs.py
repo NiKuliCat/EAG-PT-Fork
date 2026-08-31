@@ -53,6 +53,19 @@ class TracerConfig(BaseConfig):
 
         self.DATASET_IS_SYNTHETIC: bool = False
 
+        # [PBR material recovery]
+        self.PBR_ENABLED: bool = False
+        self.PBR_STAGE: int = 0
+        self.PBR_ITERATIONS: int = 400
+        self.PBR_SPP: int = 256
+        self.PBR_METALLIC_DEFAULT: float = 0.0
+        self.PBR_ROUGHNESS_DEFAULT: float = 0.5
+        self.PBR_LAMBDA_BASECOLOR: float = 1.0
+        self.PBR_LAMBDA_ROUGHNESS: float = 0.5
+        self.PBR_LAMBDA_METALLIC: float = 1.0
+        self.PBR_LAMBDA_RENDER: float = 0.1
+        self.PBR_LAMBDA_SMOOTH: float = 0.05
+
         # [training]
 
         # self.ITERATION: int = 6400
@@ -81,6 +94,8 @@ class TracerConfig(BaseConfig):
         self.N_SPP_OPTIMIZE_ALBEDO: int = 16
 
         self.LEARNING_RATE_ALBEDO: float = 0.05
+        self.LEARNING_RATE_ROUGHNESS: float = 0.05
+        self.LEARNING_RATE_METALLIC: float = 0.05
 
         # [training]
 

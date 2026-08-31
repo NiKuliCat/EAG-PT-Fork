@@ -982,9 +982,16 @@ def main(tracer_config: TracerConfig):
 
     if not tracer_config.RENDER_FOR_LIGHT_BAKING:
         # [common]
+        cameras_to_render = nvs_dataset.test_set_cameras
+        if tracer_config.PBR_ENABLED:
+            # Keep PBR validation bounded to two deterministic held-out views.
+            cameras_to_render = [
+                nvs_dataset.test_set_cameras[0],
+                nvs_dataset.test_set_cameras[len(nvs_dataset.test_set_cameras) // 2],
+            ]
         RenderAndSave0Bounce1BouncePathTracingResults(
             edited_gaussians=edited_gaussians,
-            cameras_to_render=nvs_dataset.test_set_cameras,
+            cameras_to_render=cameras_to_render,
             # cameras_to_render=nvs_dataset.train_set_cameras[63-1],  # for FR-classroom Teaser
         )
     else:
