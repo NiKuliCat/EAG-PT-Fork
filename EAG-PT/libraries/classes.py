@@ -798,11 +798,16 @@ class EAGNvsDataset:
                 / f"{frame['file_name']}.exr"
             )
             if possible_labeled_emissive_path.exists():
-                camera.gt_image_emissive = (
-                    UTILITIES_IO.ReadExrDepthFromBlender(possible_labeled_emissive_path)
-                    .to(dtype=torch.float32)
-                    .cpu()
-                )
+                labeled_emissive = UTILITIES_IO.ReadExrDepthFromBlender(
+                    possible_labeled_emissive_path
+                ).to(dtype=torch.float32)
+                if tracer_config.PBR_ENABLED:
+                    # Emit is RGB radiance, while the original EAG-PT emissive
+                    # property is a scalar light-source mask.
+                    labeled_emissive = (
+                        labeled_emissive[:3].abs().amax(dim=0, keepdim=True) > 1.0e-6
+                    ).to(dtype=torch.float32)
+                camera.gt_image_emissive = labeled_emissive.cpu()
             else:
                 camera.gt_image_emissive = None
 
