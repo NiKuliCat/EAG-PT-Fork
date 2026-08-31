@@ -59,6 +59,7 @@ class TracerConfig(BaseConfig):
         self.PBR_ITERATIONS: int = 400
         self.PBR_SPP: int = 256
         self.PBR_METALLIC_DEFAULT: float = 0.0
+        self.PBR_METALLIC_STAGE2_INITIAL: float = 0.05
         self.PBR_ROUGHNESS_DEFAULT: float = 0.5
         self.PBR_LAMBDA_BASECOLOR: float = 1.0
         self.PBR_LAMBDA_ROUGHNESS: float = 0.5

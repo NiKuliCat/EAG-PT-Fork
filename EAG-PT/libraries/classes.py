@@ -3398,6 +3398,21 @@ class LearnableEmissionAwareGaussians(torch.nn.Module):
         stage = int(tracer_config.PBR_STAGE)
         if stage not in (1, 2):
             raise ValueError("PBR_STAGE must be 1 (BaseColor/Roughness) or 2 (Metallic).")
+        if stage == 2:
+            metallic_initial = float(tracer_config.PBR_METALLIC_STAGE2_INITIAL)
+            if not 0.0 < metallic_initial < 1.0:
+                raise ValueError("PBR_METALLIC_STAGE2_INITIAL must be between 0 and 1.")
+            # Stage 1 stores the fixed metallic default near zero. Reinitialize the
+            # raw sigmoid parameter away from saturation before learning Metallic.
+            with torch.no_grad():
+                initial_values = torch.full_like(
+                    self.parameters_metallics, metallic_initial
+                )
+                self.parameters_metallics.copy_(
+                    LearnableEmissionAwareGaussians.InverseActivationMetallics(
+                        initial_values
+                    )
+                )
         params = [
             {"params": [self.parameters_albedos],
              "lr": tracer_config.LEARNING_RATE_ALBEDO if stage == 1 else 0.0},
