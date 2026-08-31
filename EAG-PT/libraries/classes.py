@@ -1993,7 +1993,15 @@ class EmissionAwareGaussians:
                 gt_image_emissive = None
 
             if tracer_config.DATASET_IS_SYNTHETIC:
-                gt_image_albedo = camera.gt_image_albedo.cuda()
+                gt_material = (
+                    camera.gt_image_basecolor
+                    if tracer_config.PBR_ENABLED
+                    else camera.gt_image_albedo
+                )
+                if gt_material is None:
+                    material_name = "BaseColor" if tracer_config.PBR_ENABLED else "Albedo"
+                    raise RuntimeError(f"Synthetic dataset has no {material_name} ground truth.")
+                gt_image_albedo = gt_material.cuda()
 
             # [save gt: rgb/a/rgba emissives depth/normal]
 
@@ -2189,7 +2197,7 @@ class EmissionAwareGaussians:
 
             if tracer_config.DATASET_IS_SYNTHETIC:
                 psnr_albedo_linear = UTILITIES_IMAGE.Psnr(
-                    image=camera.gt_image_albedo.cuda()
+                    image=gt_image_albedo
                     * (1.0 - render_results_image_emissive_float),
                     target=render_results.image_albedo
                     * (1.0 - render_results_image_emissive_float),
@@ -2199,7 +2207,7 @@ class EmissionAwareGaussians:
                 psnr_albedo_srgbclip = UTILITIES_IMAGE.Psnr(
                     image=UTILITIES_COLOUR.LinearToSrgb(
                         (
-                            camera.gt_image_albedo.cuda()
+                            gt_image_albedo
                             * (1.0 - render_results_image_emissive_float)
                         )
                     ).clip(min=0.0, max=1.0),
