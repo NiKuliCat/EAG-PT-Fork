@@ -1646,13 +1646,54 @@ class EmissionAwareGaussians:
             ]
             + [("roughnesses", "f4"), ("metallics", "f4")]
         )
-
         UTILITIES_IO.SavePlyUsingPlyfilePackage(
             path=path,
             points=ply_points,
             properties=ply_properties,
         )
         ExLog(f"Saved {self.count} points to {path}.")
+
+    @torch.no_grad()
+    def buildEmitterSamplingDistribution(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build the power-weighted emitter distribution used by P4 NEE."""
+        gaussian_z = 1.0 - math.exp(-0.5 * 3.0 * 3.0)
+        effective_area = (
+            2.0
+            * math.pi
+            * self.scales[:, 0].abs()
+            * self.scales[:, 1].abs()
+            * gaussian_z
+        )
+        radiance_luminance = (
+            0.2126 * self.radiances[:, 0]
+            + 0.7152 * self.radiances[:, 1]
+            + 0.0722 * self.radiances[:, 2]
+        ).clamp_min(0.0)
+        powers = (
+            radiance_luminance
+            * self.emissives[:, 0].clamp(0.0, 1.0)
+            * self.opacities[:, 0].clamp(0.0, 1.0)
+            * effective_area
+        )
+        valid = torch.isfinite(powers) & (powers > 0.0)
+        emitter_ids = torch.nonzero(valid, as_tuple=False)[:, 0].to(torch.int32)
+        reverse_pdf = torch.zeros(
+            (self.count,), dtype=torch.float32, device=self.positions.device
+        )
+        if emitter_ids.numel() == 0:
+            empty = torch.empty(
+                (0,), dtype=torch.float32, device=self.positions.device
+            )
+            return emitter_ids, empty, empty, reverse_pdf
+
+        emitter_powers = powers[valid].to(torch.float32)
+        emitter_pdf = emitter_powers / emitter_powers.sum()
+        emitter_cdf = torch.cumsum(emitter_pdf, dim=0)
+        emitter_cdf[-1] = 1.0
+        reverse_pdf[emitter_ids.to(torch.long)] = emitter_pdf
+        return emitter_ids, emitter_pdf, emitter_cdf, reverse_pdf
 
     def saveColoredPointCloud(self, path: pathlib.Path) -> None:
         ply_points = np.concatenate(
@@ -2371,7 +2412,6 @@ class EmissionAwareGaussians:
         record_denoised_gamma_psnrs: list[float] = []
         record_denoised_gamma_lpipss: list[float] = []
         record_denoised_linear_flips: list[float] = []
-
         for i_camera, camera in enumerate(cameras):
 
             with torch.no_grad():
@@ -2504,12 +2544,20 @@ class EmissionAwareGaussians:
             triangles_indices.contiguous().data_ptr(),
         )
 
+        emitter_ids, emitter_pdf, emitter_cdf, reverse_emitter_pdf = (
+            self.buildEmitterSamplingDistribution()
+        )
+        ExLog(
+            f"P4 emitter distribution contains {emitter_ids.numel()} surfels."
+        )
+
         # [records]
 
         record_durations: list[float] = []
         record_denoised_gamma_psnrs: list[float] = []
         record_denoised_gamma_lpipss: list[float] = []
         record_denoised_linear_flips: list[float] = []
+        record_decomposition_errors: list[float] = []
 
         for i_camera, camera in enumerate(cameras):
             # if i_camera in [26, 23, 33, 15, 27]: # [my-box]
@@ -2521,8 +2569,20 @@ class EmissionAwareGaussians:
 
             rays = camera.generateRays()
 
+            frame_id = str(camera.name).replace("\\", "/").split("/")[-1]
+            if not frame_id:
+                frame_id = f"camera{i_camera}"
+
             pixels_rendering_radiances = torch.zeros(
                 (camera.image_height * camera.image_width, 3),
+                dtype=torch.float32,
+                device="cuda",
+            )
+            pixels_direct_radiances = torch.zeros_like(pixels_rendering_radiances)
+            pixels_indirect_radiances = torch.zeros_like(pixels_rendering_radiances)
+            pixels_emission_radiances = torch.zeros_like(pixels_rendering_radiances)
+            pixels_shadow_visibilities = torch.zeros(
+                (camera.image_height * camera.image_width, 1),
                 dtype=torch.float32,
                 device="cuda",
             )
@@ -2535,6 +2595,14 @@ class EmissionAwareGaussians:
                     camera.image_width,
                     bounce_limit,  # bounce_limit
                     spp,  # spp
+                    tracer_config.PBR_ENABLED
+                    and tracer_config.PBR_PT_USE_DISNEY_SAMPLING,
+                    tracer_config.PBR_ENABLED and tracer_config.PBR_PT_USE_NEE,
+                    tracer_config.PBR_ENABLED and tracer_config.PBR_PT_USE_MIS,
+                    tracer_config.PBR_ENABLED
+                    and tracer_config.PBR_PT_USE_RUSSIAN_ROULETTE,
+                    tracer_config.PBR_PT_RR_START_BOUNCE,
+                    tracer_config.PBR_PT_LIGHT_SAMPLES,
                     # [input - surfels]
                     self.positions.contiguous().data_ptr(),
                     self.scales.contiguous().data_ptr(),
@@ -2545,11 +2613,21 @@ class EmissionAwareGaussians:
                     self.albedos.contiguous().data_ptr(),
                     self.roughnesses.contiguous().data_ptr(),
                     self.metallics.contiguous().data_ptr(),
+                    # [input - emitter sampling]
+                    emitter_ids.numel(),
+                    emitter_ids.contiguous().data_ptr(),
+                    emitter_pdf.contiguous().data_ptr(),
+                    emitter_cdf.contiguous().data_ptr(),
+                    reverse_emitter_pdf.contiguous().data_ptr(),
                     # [input - rays]
                     rays.origins.contiguous().data_ptr(),
                     rays.directions.contiguous().data_ptr(),
                     # [output - results]
                     pixels_rendering_radiances.contiguous().data_ptr(),
+                    pixels_direct_radiances.contiguous().data_ptr(),
+                    pixels_indirect_radiances.contiguous().data_ptr(),
+                    pixels_emission_radiances.contiguous().data_ptr(),
+                    pixels_shadow_visibilities.contiguous().data_ptr(),
                 )
                 duration = timer.stop()
             record_durations.append(duration)
@@ -2557,6 +2635,81 @@ class EmissionAwareGaussians:
             image_averaged_noisy = einops.rearrange(
                 pixels_rendering_radiances, "p c -> c p"
             ).reshape((3, camera.image_height, camera.image_width))
+            image_direct = EAGTracingResult.pc2cp(
+                pixels_direct_radiances, camera.image_height, camera.image_width
+            )
+            image_indirect = EAGTracingResult.pc2cp(
+                pixels_indirect_radiances, camera.image_height, camera.image_width
+            )
+            image_emission = EAGTracingResult.pc2cp(
+                pixels_emission_radiances, camera.image_height, camera.image_width
+            )
+            image_shadow = EAGTracingResult.pc2cp(
+                pixels_shadow_visibilities, camera.image_height, camera.image_width
+            )
+
+            p4_outputs = {
+                "total": image_averaged_noisy,
+                "direct": image_direct,
+                "indirect": image_indirect,
+                "emission": image_emission,
+                "shadow": image_shadow,
+            }
+            for output_name, output in p4_outputs.items():
+                if not torch.isfinite(output).all():
+                    raise RuntimeError(
+                        f"P4 {output_name} contains NaN/Inf for {frame_id}."
+                    )
+            if image_shadow.min().item() < 0.0 or image_shadow.max().item() > 1.0:
+                raise RuntimeError(f"P4 shadow is outside [0, 1] for {frame_id}.")
+
+            decomposition_error = (
+                image_averaged_noisy - image_direct - image_indirect - image_emission
+            ).abs().max().item()
+            record_decomposition_errors.append(decomposition_error)
+            if decomposition_error >= 1.0e-4:
+                raise RuntimeError(
+                    f"P4 decomposition mismatch for {frame_id}: {decomposition_error}"
+                )
+
+            if tracer_config.PBR_PT_SAVE_DECOMPOSITION:
+                UTILITIES_IO.SaveExrImage(
+                    image_direct, path=folder_path / f"{frame_id}_direct.exr"
+                )
+                UTILITIES_IO.SaveExrImage(
+                    image_indirect, path=folder_path / f"{frame_id}_indirect.exr"
+                )
+                UTILITIES_IO.SaveExrImage(
+                    image_emission, path=folder_path / f"{frame_id}_emission.exr"
+                )
+                UTILITIES_IO.SaveExrImage(
+                    image_shadow, path=folder_path / f"{frame_id}_shadow.exr"
+                )
+                material_basecolor, material_roughness, material_metallic = (
+                    EAG_OptiX_materialpass.apply(
+                        camera,
+                        sample_renderer,
+                        self.positions,
+                        self.scales,
+                        self.quaternions,
+                        self.opacities,
+                        self.albedos,
+                        self.roughnesses,
+                        self.metallics,
+                    )
+                )
+                UTILITIES_IO.SaveExrImage(
+                    material_basecolor,
+                    path=folder_path / f"{frame_id}_BaseColor.exr",
+                )
+                UTILITIES_IO.SaveExrImage(
+                    material_roughness,
+                    path=folder_path / f"{frame_id}_Roughness.exr",
+                )
+                UTILITIES_IO.SaveExrImage(
+                    material_metallic,
+                    path=folder_path / f"{frame_id}_Metallic.exr",
+                )
 
             # [save image]
 
@@ -2565,7 +2718,7 @@ class EmissionAwareGaussians:
             gt_image_linear = camera.gt_image_radiance_rgb_linear_premultiplied.cuda()
             UTILITIES_IO.SaveExrImage(
                 gt_image_linear,
-                path=folder_path / f"camera{i_camera}_gt-radiance_rgb.exr",
+                path=folder_path / f"{frame_id}_gt-radiance_rgb.exr",
             )
 
             try:
@@ -2583,7 +2736,7 @@ class EmissionAwareGaussians:
                 UTILITIES_IO.SaveExrImage(
                     image_averaged_noisy,
                     path=folder_path
-                    / f"camera{i_camera}_spp{spp}_radiance_noisy_psnrsrgbclip{psnr_gamma_rendered_noisy.item():.2f}.exr",
+                    / f"{frame_id}_spp{spp}_radiance_noisy_psnrsrgbclip{psnr_gamma_rendered_noisy.item():.2f}.exr",
                 )
 
             except:
@@ -2592,7 +2745,7 @@ class EmissionAwareGaussians:
 
                 UTILITIES_IO.SaveExrImage(
                     image_averaged_noisy,
-                    path=folder_path / f"camera{i_camera}_spp{spp}_radiance_noisy.exr",
+                    path=folder_path / f"{frame_id}_spp{spp}_radiance_noisy.exr",
                 )
 
                 image_averaged_denoised = UTILITIES_IMAGE.Denoise(
@@ -2602,7 +2755,7 @@ class EmissionAwareGaussians:
                 UTILITIES_IO.SaveExrImage(
                     image_averaged_denoised,
                     path=folder_path
-                    / f"camera{i_camera}_spp{spp}_radiance_duration{duration:.3f}_denoised.exr",
+                    / f"{frame_id}_spp{spp}_radiance_duration{duration:.3f}_denoised.exr",
                 )
 
                 ExLog(f"Saved {spp=}", "Teaser")
@@ -2646,13 +2799,13 @@ class EmissionAwareGaussians:
             UTILITIES_IO.SaveImage(
                 image_flip_values,
                 folder_path
-                / f"camera{i_camera}_spp{spp}_fliplinear{flip_linear_rendered_denoised:.4f}.png",
+                / f"{frame_id}_spp{spp}_fliplinear{flip_linear_rendered_denoised:.4f}.png",
             )
 
             UTILITIES_IO.SaveExrImage(
                 image_averaged_denoised,
                 path=folder_path
-                / f"camera{i_camera}_spp{spp}_radiance_duration{duration:.3f}_denoised_psnrsrgbclip{psnr_gamma_rendered_denoised.item():.2f}_lpipssrgbclip{lpips_gamma_rendered_denoised.item():.4f}_fliplinear{flip_linear_rendered_denoised:.4f}.exr",
+                / f"{frame_id}_spp{spp}_radiance_duration{duration:.3f}_denoised_psnrsrgbclip{psnr_gamma_rendered_denoised.item():.2f}_lpipssrgbclip{lpips_gamma_rendered_denoised.item():.4f}_fliplinear{flip_linear_rendered_denoised:.4f}.exr",
             )
 
         record_file_path = folder_path / "_records.py"
@@ -2677,6 +2830,16 @@ class EmissionAwareGaussians:
 
             f.write(f"denoised_gamma_lpipss = {record_denoised_gamma_lpipss}\n")
             f.write(f"denoised_linear_flips = {record_denoised_linear_flips}\n")
+            f.write(f"decomposition_errors = {record_decomposition_errors}\n")
+            f.write(f"emissive_surfels_count = {emitter_ids.numel()}\n")
+            f.write(
+                f"pbr_pt_use_disney_sampling = {tracer_config.PBR_PT_USE_DISNEY_SAMPLING}\n"
+            )
+            f.write(f"pbr_pt_use_nee = {tracer_config.PBR_PT_USE_NEE}\n")
+            f.write(f"pbr_pt_use_mis = {tracer_config.PBR_PT_USE_MIS}\n")
+            f.write(
+                f"pbr_pt_use_russian_roulette = {tracer_config.PBR_PT_USE_RUSSIAN_ROULETTE}\n"
+            )
 
 
 class LearnableEmissionAwareGaussians(torch.nn.Module):

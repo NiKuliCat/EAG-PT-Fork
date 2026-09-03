@@ -77,7 +77,11 @@ namespace osc
         float &Emissive,
         float3 &Albedo,
         float &Roughness,
-        float &Metallic)
+        float &Metallic,
+        int *dominant_surfel_id = nullptr,
+        float2 *dominant_surfel_uv = nullptr,
+        float *dominant_surfel_distance = nullptr,
+        float3 *EmissionRadiance = nullptr)
     {
         // avoid surfels near camera
         float distance_to_start_tracing_ray = NEAREST_DISTANCE_TO_AVOID_FRONT_SURFELS;
@@ -95,6 +99,15 @@ namespace osc
         Albedo = make_float3(0.0f, 0.0f, 0.0f);
         Roughness = 0.0f;
         Metallic = 0.0f;
+        float dominant_weight = 0.0f;
+        if (dominant_surfel_id != nullptr)
+            *dominant_surfel_id = -1;
+        if (dominant_surfel_uv != nullptr)
+            *dominant_surfel_uv = make_float2(0.0f);
+        if (dominant_surfel_distance != nullptr)
+            *dominant_surfel_distance = 0.0f;
+        if (EmissionRadiance != nullptr)
+            *EmissionRadiance = make_float3(0.0f);
 
         // tracing (0-bounce) along the ray
         while (1)
@@ -171,11 +184,28 @@ namespace osc
 
                 Radiance += weight * optixLaunchParams.surfels_radiances[surfel_id];
                 Emissive += weight * optixLaunchParams.surfels_emissives[surfel_id];
+                if (EmissionRadiance != nullptr)
+                {
+                    *EmissionRadiance += weight *
+                                         optixLaunchParams.surfels_radiances[surfel_id] *
+                                         fminf(fmaxf(optixLaunchParams.surfels_emissives[surfel_id], 0.0f), 1.0f);
+                }
                 Albedo += weight * optixLaunchParams.surfels_albedos[surfel_id];
                 if (optixLaunchParams.surfels_roughnesses != nullptr)
                     Roughness += weight * optixLaunchParams.surfels_roughnesses[surfel_id];
                 if (optixLaunchParams.surfels_metallics != nullptr)
                     Metallic += weight * optixLaunchParams.surfels_metallics[surfel_id];
+
+                if (weight > dominant_weight)
+                {
+                    dominant_weight = weight;
+                    if (dominant_surfel_id != nullptr)
+                        *dominant_surfel_id = surfel_id;
+                    if (dominant_surfel_uv != nullptr)
+                        *dominant_surfel_uv = surfel_uv;
+                    if (dominant_surfel_distance != nullptr)
+                        *dominant_surfel_distance = ray_distance;
+                }
 
                 // [accumulate end]
 
@@ -376,7 +406,8 @@ namespace osc
 
     __device__ __forceinline__ float ggx_distribution(float NoH, float roughness)
     {
-        float a = fmaxf(roughness * roughness, 0.0004f);
+        roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+        float a = roughness * roughness;
         float a2 = a * a;
         float denom = NoH * NoH * (a2 - 1.0f) + 1.0f;
         return a2 / fmaxf(M_PIf * denom * denom, 1.0e-7f);
@@ -384,7 +415,8 @@ namespace osc
 
     __device__ __forceinline__ float smith_g1(float NoV, float roughness)
     {
-        float a = fmaxf(roughness * roughness, 0.0004f);
+        roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+        float a = roughness * roughness;
         float k = a * 0.5f;
         return NoV / fmaxf(NoV * (1.0f - k) + k, 1.0e-6f);
     }
@@ -407,6 +439,271 @@ namespace osc
         float3 kd = basecolor * (1.0f - metallic) / M_PIf;
         float3 spec = F * (D * G / fmaxf(4.0f * NoL * NoV, 1.0e-6f));
         return kd + spec;
+    }
+
+    __device__ __forceinline__ float luminance(const float3 &value)
+    {
+        return 0.2126f * value.x + 0.7152f * value.y + 0.0722f * value.z;
+    }
+
+    __device__ __forceinline__ float max_component(const float3 &value)
+    {
+        return fmaxf(value.x, fmaxf(value.y, value.z));
+    }
+
+    __device__ __forceinline__ void make_orthonormal_basis(
+        const float3 &normal, float3 &tangent, float3 &bitangent)
+    {
+        const float3 helper = fabsf(normal.z) < 0.999f
+                                  ? make_float3(0.0f, 0.0f, 1.0f)
+                                  : make_float3(0.0f, 1.0f, 0.0f);
+        tangent = normalize(cross(helper, normal));
+        bitangent = cross(normal, tangent);
+    }
+
+    __device__ __forceinline__ float3 to_world(
+        const float3 &local, const float3 &normal)
+    {
+        float3 tangent, bitangent;
+        make_orthonormal_basis(normal, tangent, bitangent);
+        return normalize(local.x * tangent + local.y * bitangent + local.z * normal);
+    }
+
+    __device__ __forceinline__ float disney_specular_probability(
+        const float3 &basecolor, float metallic)
+    {
+        metallic = fminf(fmaxf(metallic, 0.0f), 1.0f);
+        const float3 f0 = make_float3(0.04f) * (1.0f - metallic) + basecolor * metallic;
+        const float3 kd = basecolor * (1.0f - metallic);
+        const float denominator = luminance(f0) + luminance(kd);
+        const float probability = denominator > 1.0e-8f ? luminance(f0) / denominator : 0.5f;
+        return fminf(fmaxf(probability, 0.1f), 0.9f);
+    }
+
+    __device__ __forceinline__ float cosine_hemisphere_pdf(
+        const float3 &normal, const float3 &wi)
+    {
+        return fmaxf(dot(normal, wi), 0.0f) / M_PIf;
+    }
+
+    __device__ __forceinline__ float ggx_reflection_pdf(
+        const float3 &normal, const float3 &wi, const float3 &wo, float roughness)
+    {
+        const float NoL = dot(normal, wi);
+        const float NoV = dot(normal, wo);
+        if (NoL <= 0.0f || NoV <= 0.0f)
+            return 0.0f;
+        const float3 half_vector = normalize(wi + wo);
+        const float NoH = fmaxf(dot(normal, half_vector), 0.0f);
+        const float VoH = fmaxf(dot(wo, half_vector), 0.0f);
+        if (VoH <= 0.0f)
+            return 0.0f;
+        return ggx_distribution(NoH, roughness) * NoH / fmaxf(4.0f * VoH, 1.0e-7f);
+    }
+
+    __device__ __forceinline__ float disney_mixture_pdf(
+        const float3 &normal, const float3 &wi, const float3 &wo,
+        const float3 &basecolor, float metallic, float roughness)
+    {
+        const float p_spec = disney_specular_probability(basecolor, metallic);
+        return (1.0f - p_spec) * cosine_hemisphere_pdf(normal, wi) +
+               p_spec * ggx_reflection_pdf(normal, wi, wo, roughness);
+    }
+
+    __device__ bool sample_disney_brdf(
+        const float3 &normal, const float3 &wo,
+        const float3 &basecolor, float metallic, float roughness,
+        curandState &curand_state, float3 &wi, float &pdf)
+    {
+        const float p_spec = disney_specular_probability(basecolor, metallic);
+        const float choose = curand_uniform(&curand_state);
+        const float u1 = fminf(curand_uniform(&curand_state), 0.99999994f);
+        const float u2 = curand_uniform(&curand_state);
+
+        if (choose < p_spec)
+        {
+            roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+            const float alpha = roughness * roughness;
+            const float tan_theta2 = alpha * alpha * u1 / fmaxf(1.0f - u1, 1.0e-7f);
+            const float cos_theta = rsqrtf(1.0f + tan_theta2);
+            const float sin_theta = sqrtf(fmaxf(0.0f, 1.0f - cos_theta * cos_theta));
+            const float phi = 2.0f * M_PIf * u2;
+            const float3 half_vector = to_world(
+                make_float3(sin_theta * cosf(phi), sin_theta * sinf(phi), cos_theta), normal);
+            const float VoH = dot(wo, half_vector);
+            if (VoH <= 0.0f)
+            {
+                pdf = 0.0f;
+                return false;
+            }
+            wi = normalize(2.0f * VoH * half_vector - wo);
+        }
+        else
+        {
+            const float radius = sqrtf(u1);
+            const float phi = 2.0f * M_PIf * u2;
+            wi = to_world(make_float3(
+                              radius * cosf(phi), radius * sinf(phi),
+                              sqrtf(fmaxf(0.0f, 1.0f - u1))),
+                          normal);
+        }
+
+        pdf = disney_mixture_pdf(normal, wi, wo, basecolor, metallic, roughness);
+        return dot(normal, wi) > 0.0f && isfinite(pdf) && pdf > 1.0e-7f;
+    }
+
+    __device__ __forceinline__ float power_heuristic(float pdf_a, float pdf_b)
+    {
+        const float a2 = pdf_a * pdf_a;
+        const float b2 = pdf_b * pdf_b;
+        return (a2 + b2) > 0.0f ? a2 / (a2 + b2) : 0.0f;
+    }
+
+    __device__ __forceinline__ void surfel_frame(
+        int surfel_id, float3 &tangent, float3 &bitangent, float3 &normal)
+    {
+        const float4 q = optixLaunchParams.surfels_quaternions[surfel_id];
+        const float r = q.x, x = q.y, y = q.z, z = q.w;
+        tangent = make_float3(
+            1.0f - 2.0f * (y * y + z * z),
+            2.0f * (x * y + r * z),
+            2.0f * (x * z - r * y));
+        bitangent = make_float3(
+            2.0f * (x * y - r * z),
+            1.0f - 2.0f * (x * x + z * z),
+            2.0f * (y * z + r * x));
+        normal = make_float3(
+            2.0f * (x * z + r * y),
+            2.0f * (y * z - r * x),
+            1.0f - 2.0f * (x * x + y * y));
+        tangent = normalize(tangent);
+        bitangent = normalize(bitangent);
+        normal = normalize(normal);
+    }
+
+    __device__ float trace_shadow_transmittance(
+        const float3 &ray_origin, const float3 &ray_direction, float maximum_distance,
+        PerRayData &per_ray_data, uint32_t &payload_u0, uint32_t &payload_u1)
+    {
+        if (maximum_distance <= MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION)
+            return 0.0f;
+        float transmittance = 1.0f;
+        float tmin = MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION;
+        const float tmax = maximum_distance - MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION;
+        bool ended = false;
+        while (!ended && tmin < tmax)
+        {
+            for (int i = 0; i < ANYHIT_CHUNK_BUFFER_SIZE; ++i)
+                per_ray_data.buffer[i].distance = SCENE_MAX_DISTANCE;
+            optixTrace(
+                optixLaunchParams.traversable, ray_origin, ray_direction,
+                tmin, tmax, 0.0f, OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE,
+                0, 0, 0, payload_u0, payload_u1);
+            for (int i = 0; i < ANYHIT_CHUNK_BUFFER_SIZE; ++i)
+            {
+                const float distance = per_ray_data.buffer[i].distance;
+                if (distance == SCENE_MAX_DISTANCE)
+                {
+                    ended = true;
+                    break;
+                }
+                const int id = per_ray_data.buffer[i].surfel_id;
+                const float2 uv = per_ray_data.buffer[i].surfel_uv;
+                const float eta = fminf(fmaxf(
+                    optixLaunchParams.surfels_opacities[id] *
+                        expf(-0.5f * (uv.x * uv.x + uv.y * uv.y)),
+                    0.0f), 1.0f);
+                transmittance *= 1.0f - eta;
+                if (transmittance < TRANSMITTANCE_THRESHOLD)
+                {
+                    ended = true;
+                    break;
+                }
+            }
+            if (!ended)
+                tmin = per_ray_data.buffer[ANYHIT_CHUNK_BUFFER_SIZE - 1].distance +
+                       MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION;
+        }
+        return fminf(fmaxf(transmittance, 0.0f), 1.0f);
+    }
+
+    __device__ bool sample_emitter(
+        const float3 &surface_position, curandState &curand_state,
+        float3 &wi, float3 &emitted_radiance, float &distance,
+        float &solid_angle_pdf)
+    {
+        if (optixLaunchParams.emissive_surfels_count <= 0)
+            return false;
+        const float cdf_sample = fminf(curand_uniform(&curand_state), 0.99999994f);
+        int low = 0;
+        int high = optixLaunchParams.emissive_surfels_count - 1;
+        while (low < high)
+        {
+            const int middle = (low + high) / 2;
+            if (cdf_sample <= optixLaunchParams.emissive_surfels_proportions_cdfs[middle])
+                high = middle;
+            else
+                low = middle + 1;
+        }
+        const int emitter_index = low;
+        const int surfel_id = optixLaunchParams.emissive_surfels_ids[emitter_index];
+        const float selection_pdf = optixLaunchParams.emissive_surfels_proportions_pdfs[emitter_index];
+
+        const float radial_sample = fminf(curand_uniform(&curand_state), 0.99999994f);
+        const float angular_sample = curand_uniform(&curand_state);
+        const float gaussian_z = 1.0f - expf(-4.5f);
+        const float radius = sqrtf(-2.0f * logf(fmaxf(1.0f - radial_sample * gaussian_z, 1.0e-7f)));
+        const float phi = 2.0f * M_PIf * angular_sample;
+        const float u = radius * cosf(phi);
+        const float v = radius * sinf(phi);
+
+        float3 tangent, bitangent, light_normal;
+        surfel_frame(surfel_id, tangent, bitangent, light_normal);
+        const float2 scale = optixLaunchParams.surfels_scales[surfel_id];
+        const float3 light_position = optixLaunchParams.surfels_positions[surfel_id] +
+                                      tangent * (u * scale.x) + bitangent * (v * scale.y);
+        const float3 delta = light_position - surface_position;
+        const float distance2 = dot(delta, delta);
+        if (distance2 <= 1.0e-10f)
+            return false;
+        distance = sqrtf(distance2);
+        wi = delta / distance;
+        const float light_cosine = fabsf(dot(light_normal, -wi));
+        if (light_cosine <= 1.0e-7f)
+            return false;
+
+        const float area_normalization = 2.0f * M_PIf * fabsf(scale.x * scale.y) * gaussian_z;
+        const float area_pdf = expf(-0.5f * radius * radius) /
+                               fmaxf(area_normalization, 1.0e-12f);
+        solid_angle_pdf = selection_pdf * area_pdf * distance2 / light_cosine;
+        const float emission_alpha = fminf(fmaxf(
+            optixLaunchParams.surfels_emissives[surfel_id] *
+                optixLaunchParams.surfels_opacities[surfel_id] *
+                expf(-0.5f * radius * radius),
+            0.0f), 1.0f);
+        emitted_radiance = optixLaunchParams.surfels_radiances[surfel_id] * emission_alpha;
+        return solid_angle_pdf > 1.0e-12f && isfinite(solid_angle_pdf);
+    }
+
+    __device__ float emitter_hit_solid_angle_pdf(
+        int surfel_id, const float2 &uv, float distance, const float3 &ray_direction)
+    {
+        if (surfel_id < 0 || optixLaunchParams.surfels_emissive_selection_pdfs == nullptr)
+            return 0.0f;
+        const float selection_pdf = optixLaunchParams.surfels_emissive_selection_pdfs[surfel_id];
+        if (selection_pdf <= 0.0f)
+            return 0.0f;
+        float3 tangent, bitangent, light_normal;
+        surfel_frame(surfel_id, tangent, bitangent, light_normal);
+        const float light_cosine = fabsf(dot(light_normal, -ray_direction));
+        if (light_cosine <= 1.0e-7f)
+            return 0.0f;
+        const float2 scale = optixLaunchParams.surfels_scales[surfel_id];
+        const float gaussian_z = 1.0f - expf(-4.5f);
+        const float area_normalization = 2.0f * M_PIf * fabsf(scale.x * scale.y) * gaussian_z;
+        const float area_pdf = expf(-0.5f * (uv.x * uv.x + uv.y * uv.y)) /
+                               fmaxf(area_normalization, 1.0e-12f);
+        return selection_pdf * area_pdf * distance * distance / light_cosine;
     }
 
     extern "C" __global__ void __raygen__materialpass()
@@ -481,12 +778,14 @@ namespace osc
         float3 camera_Albedo;
         float camera_Roughness;
         float camera_Metallic;
+        float3 camera_emission_radiance;
 
         trace_forth_with_material(
             camera_ray_origin, camera_ray_direction,
             per_ray_data, per_ray_data_u0, per_ray_data_u1,
             camera_Hitcount, camera_Alpha, camera_Distance, camera_Normal, camera_Radiance, camera_Emissive, camera_Albedo,
-            camera_Roughness, camera_Metallic);
+            camera_Roughness, camera_Metallic,
+            nullptr, nullptr, nullptr, &camera_emission_radiance);
 
         // [save pixels_albedos for backward pass]
 
@@ -496,14 +795,7 @@ namespace osc
 
         // [start path tracing]
 
-        // if hit emissive, directly return
-        if (camera_Emissive > EMISSIVE_IS_LIGHT_SOURCE_THRESHOLD)
-        {
-            optixLaunchParams.pixels_rendering_radiances[i_pixel] = camera_Radiance;
-            return;
-        }
-
-        // else, not hit emissive, and bounce limit > 0, sample a new direction and shoot the new ray
+        // Emission and reflection are independent material lobes.
 
         // to accumulate all spp
         float3 path_tracing_radiance = make_float3(0.0f, 0.0f, 0.0f);
@@ -542,7 +834,11 @@ namespace osc
                 // 1-bounce into radiant scene
                 {
                     float probability;
-                    sample_upper_hemisphere_direction(intersection_Normal, curand_state, ray_direction_incident, probability);
+                    if (!sample_disney_brdf(
+                            intersection_Normal, ray_direction_outgoing,
+                            intersection_Albedo, intersection_Metallic, intersection_Roughness,
+                            curand_state, ray_direction_incident, probability))
+                        continue;
 
                     // [calculate throughput at previous intersection point]
 
@@ -569,6 +865,8 @@ namespace osc
             path_tracing_radiance /= (float)optixLaunchParams.SPP;
         }
 
+        path_tracing_radiance += camera_emission_radiance;
+
         // return path tracing result
         optixLaunchParams.pixels_rendering_radiances[i_pixel] = path_tracing_radiance;
         optixLaunchParams.pixels_d_rendering_radiances_d_P[i_pixel] = path_tracing_radiance;
@@ -576,158 +874,192 @@ namespace osc
 
     extern "C" __global__ void __raygen__pathtracing()
     {
-        // [get ids of the current thread]
-
         const uint3 launchIndex = optixGetLaunchIndex();
-
         const int i_pixel = launchIndex.y * optixLaunchParams.WIDTH + launchIndex.x;
-
-        // if (i_pixel == 0)
-        // {
-        //     printf("[DEBUG] calling __raygen__pathtracing()\n");
-        // }
-
-        // [prepare and share the random generator through a pixel; each pixel has a different generator]
-
-        // https://docs.nvidia.com/cuda/curand/device-api-overview.html#device-api-overview
         curandState curand_state;
         curand_init(0, i_pixel, 0, &curand_state);
-
-        // [prepare and share a single chunk buffer for anyhit through a pixel]
-
         PerRayData per_ray_data;
         IntersectionInfo buffer[ANYHIT_CHUNK_BUFFER_SIZE];
         per_ray_data.buffer = buffer;
-
         uint32_t per_ray_data_u0, per_ray_data_u1;
         packPointer(&per_ray_data, per_ray_data_u0, per_ray_data_u1);
-
-        // [get camera origin and direction]
-
         const float3 camera_ray_origin = optixLaunchParams.rays_origins[i_pixel];
         const float3 camera_ray_direction = optixLaunchParams.rays_directions[i_pixel];
-
-        // [shoot rays from camera and use trace_forth() once for all paths]
-
         int camera_Hitcount;
         float camera_Alpha;
-
         float camera_Distance;
         float3 camera_Normal;
-
         float3 camera_Radiance;
         float camera_Emissive;
         float3 camera_Albedo;
         float camera_Roughness;
         float camera_Metallic;
-
+        int camera_dominant_id;
+        float2 camera_dominant_uv;
+        float camera_dominant_distance;
+        float3 camera_emission_radiance;
         trace_forth_with_material(
             camera_ray_origin, camera_ray_direction,
             per_ray_data, per_ray_data_u0, per_ray_data_u1,
             camera_Hitcount, camera_Alpha, camera_Distance, camera_Normal, camera_Radiance, camera_Emissive, camera_Albedo,
-            camera_Roughness, camera_Metallic);
+            camera_Roughness, camera_Metallic,
+            &camera_dominant_id, &camera_dominant_uv, &camera_dominant_distance,
+            &camera_emission_radiance);
 
-        // [path tracing]
+        float3 emission_radiance = make_float3(0.0f);
+        float3 direct_radiance = make_float3(0.0f);
+        float3 indirect_radiance = make_float3(0.0f);
+        float shadow_visibility = 0.0f;
 
-        // [start path tracing]
-
-        // if hit emissive, directly return
-        if (camera_Emissive > EMISSIVE_IS_LIGHT_SOURCE_THRESHOLD)
+        if (camera_Hitcount > 0)
         {
-            optixLaunchParams.pixels_rendering_radiances[i_pixel] = camera_Radiance;
-            return;
-        }
+            emission_radiance = camera_emission_radiance;
+            const float camera_surface_distance = camera_dominant_distance > 0.0f
+                                                      ? camera_dominant_distance
+                                                      : camera_Distance / fmaxf(camera_Alpha, 1.0e-6f);
+            const int light_samples = max(optixLaunchParams.pbr_pt_light_samples, 1);
 
-        // not use spp and directly return if bounce limit == 0
-        if (optixLaunchParams.BOUNCE_LIMIT == 0)
-        {
-            // return path tracing result
-            optixLaunchParams.pixels_rendering_radiances[i_pixel] = make_float3(0.0f, 0.0f, 0.0f);
-            return;
-        }
-
-        // else, not hit emissive, and bounce limit > 0, sample a new direction and shoot the new ray
-
-        // to accumulate all spp
-        float3 path_tracing_radiance = make_float3(0.0f, 0.0f, 0.0f);
-
-        // avoid nan
-        if (camera_Hitcount != 0)
-        {
-
-            // add radiances from all valid paths
             for (int i_spp = 0; i_spp < optixLaunchParams.SPP; ++i_spp)
             {
-                // [always start from the camera rays intersections, that not hit the emissives]
+                float3 surface_position = camera_ray_origin + camera_surface_distance * camera_ray_direction;
+                float3 outgoing = -camera_ray_direction;
+                float3 normal = normalize(camera_Normal);
+                float3 basecolor = camera_Albedo;
+                float roughness = camera_Roughness;
+                float metallic = camera_Metallic;
+                float3 throughput = make_float3(1.0f);
 
-                // start from the 0-bounce intersection point
-                float3 ray_origin = camera_ray_origin + camera_Distance * camera_ray_direction;
-                // TODO currently, ray_direction_outgoing is not used for material samplng since diffuse material is used
-                float3 ray_direction_outgoing = -camera_ray_direction;
-                float3 ray_direction_incident;
-
-                int intersection_Hitcount = camera_Hitcount;
-                float intersection_Alpha = camera_Alpha;
-
-                float intersection_Distance = camera_Distance;
-                float3 intersection_Normal = normalize(camera_Normal);
-
-                float3 intersection_Radiance = camera_Radiance;
-                float intersection_Emissive = camera_Emissive;
-                float3 intersection_Albedo = camera_Albedo;
-                float intersection_Roughness = camera_Roughness;
-                float intersection_Metallic = camera_Metallic;
-
-                // multiplication of albedos along the path
-                // calculate the currect intersected material
-                float3 path_throughput = make_float3(1.0f, 1.0f, 1.0f);
-
-                // re-trace the ray from non-emissive intersection point (camera intersection or after bouncing)
-                for (int i_bounce_turn = 0; i_bounce_turn < optixLaunchParams.BOUNCE_LIMIT; ++i_bounce_turn)
+                for (int bounce = 0; bounce < optixLaunchParams.BOUNCE_LIMIT; ++bounce)
                 {
-                    float probability;
-                    sample_upper_hemisphere_direction(intersection_Normal, curand_state, ray_direction_incident, probability);
-
-                    // [calculate throughput at previous intersection point]
-
-                    // previous: Albedo, Normal
-                    // new: ray_direction_incident, probability
-                    path_throughput *= eval_disney_brdf(
-                        intersection_Normal, ray_direction_incident, ray_direction_outgoing,
-                        intersection_Albedo, intersection_Metallic, intersection_Roughness)
-                        * dot(intersection_Normal, ray_direction_incident) / fmaxf(probability, 1.0e-6f);
-
-                    // directly update the intersection values
-                    trace_forth_with_material(
-                        ray_origin, ray_direction_incident,
-                        per_ray_data, per_ray_data_u0, per_ray_data_u1,
-                        intersection_Hitcount, intersection_Alpha, intersection_Distance, intersection_Normal, intersection_Radiance, intersection_Emissive, intersection_Albedo,
-                        intersection_Roughness, intersection_Metallic);
-                    intersection_Normal = normalize(intersection_Normal);
-
-                    // new: Emissive, Radiance
-                    if (intersection_Emissive > EMISSIVE_IS_LIGHT_SOURCE_THRESHOLD)
+                    if (optixLaunchParams.pbr_pt_use_nee && optixLaunchParams.emissive_surfels_count > 0)
                     {
-                        path_tracing_radiance += path_throughput * intersection_Radiance;
-                        break;
+                        for (int light_sample = 0; light_sample < light_samples; ++light_sample)
+                        {
+                            float3 light_direction, emitted;
+                            float light_distance, light_pdf;
+                            float visibility = 0.0f;
+                            if (sample_emitter(
+                                    surface_position, curand_state, light_direction, emitted,
+                                    light_distance, light_pdf))
+                            {
+                                const float NoL = fmaxf(dot(normal, light_direction), 0.0f);
+                                if (NoL > 0.0f)
+                                {
+                                    visibility = trace_shadow_transmittance(
+                                        surface_position, light_direction, light_distance,
+                                        per_ray_data, per_ray_data_u0, per_ray_data_u1);
+                                    const float3 brdf = eval_disney_brdf(
+                                        normal, light_direction, outgoing,
+                                        basecolor, metallic, roughness);
+                                    const float bsdf_pdf = disney_mixture_pdf(
+                                        normal, light_direction, outgoing,
+                                        basecolor, metallic, roughness);
+                                    const float mis_weight = optixLaunchParams.pbr_pt_use_mis
+                                                                 ? power_heuristic(light_pdf, bsdf_pdf)
+                                                                 : 1.0f;
+                                    const float3 contribution = throughput * brdf * emitted *
+                                                                (NoL * visibility * mis_weight /
+                                                                 fmaxf(light_pdf * light_samples, 1.0e-12f));
+                                    if (bounce == 0)
+                                        direct_radiance += contribution;
+                                    else
+                                        indirect_radiance += contribution;
+                                }
+                            }
+                            if (bounce == 0)
+                                shadow_visibility += visibility / (float)light_samples;
+                        }
                     }
 
-                    // TODO use `if (russian_roulette(&tp)) break;` to end path with small tp
+                    float3 incident;
+                    float bsdf_pdf;
+                    bool valid_sample;
+                    if (optixLaunchParams.pbr_pt_use_disney_sampling)
+                    {
+                        valid_sample = sample_disney_brdf(
+                            normal, outgoing, basecolor, metallic, roughness,
+                            curand_state, incident, bsdf_pdf);
+                    }
+                    else
+                    {
+                        sample_upper_hemisphere_direction(normal, curand_state, incident, bsdf_pdf);
+                        valid_sample = bsdf_pdf > 1.0e-7f;
+                    }
+                    if (!valid_sample)
+                        break;
 
-                    // [trace a new ray from the intersection point if not hit emissive]
+                    const float NoL = fmaxf(dot(normal, incident), 0.0f);
+                    const float3 brdf = eval_disney_brdf(
+                        normal, incident, outgoing, basecolor, metallic, roughness);
+                    throughput *= brdf * (NoL / fmaxf(bsdf_pdf, 1.0e-7f));
+                    if (!isfinite(throughput.x) || !isfinite(throughput.y) ||
+                        !isfinite(throughput.z) || max_component(throughput) <= 0.0f)
+                        break;
 
-                    ray_origin = ray_origin + intersection_Distance * ray_direction_incident;
-                    // currently ray_direction_outgoing is not used
-                    ray_direction_outgoing = -ray_direction_incident;
+                    int hitcount;
+                    float alpha, distance, emissive;
+                    float3 hit_normal, radiance, hit_basecolor;
+                    float hit_roughness, hit_metallic;
+                    int dominant_id;
+                    float2 dominant_uv;
+                    float dominant_distance;
+                    float3 hit_emission;
+                    trace_forth_with_material(
+                        surface_position, incident,
+                        per_ray_data, per_ray_data_u0, per_ray_data_u1,
+                        hitcount, alpha, distance, hit_normal, radiance, emissive, hit_basecolor,
+                        hit_roughness, hit_metallic,
+                        &dominant_id, &dominant_uv, &dominant_distance,
+                        &hit_emission);
+                    if (hitcount == 0)
+                        break;
+
+                    if (max_component(hit_emission) > 0.0f)
+                    {
+                        float mis_weight = 1.0f;
+                        if (optixLaunchParams.pbr_pt_use_nee && optixLaunchParams.pbr_pt_use_mis)
+                        {
+                            const float light_pdf = emitter_hit_solid_angle_pdf(
+                                dominant_id, dominant_uv, dominant_distance, incident);
+                            mis_weight = power_heuristic(bsdf_pdf, light_pdf);
+                        }
+                        indirect_radiance += throughput * hit_emission * mis_weight;
+                    }
+
+                    const float surface_distance = dominant_distance > 0.0f
+                                                       ? dominant_distance
+                                                       : distance / fmaxf(alpha, 1.0e-6f);
+                    surface_position += surface_distance * incident;
+                    outgoing = -incident;
+                    normal = normalize(hit_normal);
+                    basecolor = hit_basecolor;
+                    roughness = hit_roughness;
+                    metallic = hit_metallic;
+
+                    if (optixLaunchParams.pbr_pt_use_russian_roulette &&
+                        bounce >= optixLaunchParams.pbr_pt_rr_start_bounce)
+                    {
+                        const float survival = fminf(fmaxf(max_component(throughput), 0.05f), 0.95f);
+                        if (curand_uniform(&curand_state) > survival)
+                            break;
+                        throughput /= survival;
+                    }
                 }
             }
 
-            // divide spp
-            path_tracing_radiance /= (float)optixLaunchParams.SPP;
+            const float inv_spp = 1.0f / fmaxf((float)optixLaunchParams.SPP, 1.0f);
+            direct_radiance *= inv_spp;
+            indirect_radiance *= inv_spp;
+            shadow_visibility *= inv_spp;
         }
 
-        // return path tracing result
-        optixLaunchParams.pixels_rendering_radiances[i_pixel] = path_tracing_radiance;
+        const float3 total_radiance = emission_radiance + direct_radiance + indirect_radiance;
+        optixLaunchParams.pixels_rendering_radiances[i_pixel] = total_radiance;
+        optixLaunchParams.pixels_direct_radiances[i_pixel] = direct_radiance;
+        optixLaunchParams.pixels_indirect_radiances[i_pixel] = indirect_radiance;
+        optixLaunchParams.pixels_emission_radiances[i_pixel] = emission_radiance;
+        optixLaunchParams.pixels_shadow_visibilities[i_pixel] =
+            fminf(fmaxf(shadow_visibility, 0.0f), 1.0f);
     }
 
     __device__ void trace_forth_backward_nobounce(

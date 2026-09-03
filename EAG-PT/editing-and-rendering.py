@@ -32,8 +32,7 @@ def RenderAndSave0Bounce1BouncePathTracingResults(
         )
 
     if render_1_bounce:
-        for spp in [1024]:
-            # for spp in [1]:
+        for spp in [tracer_config.PBR_PT_SPP if tracer_config.PBR_ENABLED else 1024]:
             edited_gaussians.saveSingleBounceResultsOnCameras(
                 cameras=cameras_to_render,
                 tracer_config=tracer_config,
@@ -43,13 +42,16 @@ def RenderAndSave0Bounce1BouncePathTracingResults(
             )
 
     if render_path_tracing:
-        for spp in [1024]:
-            # for spp in [1]:
+        for spp in [tracer_config.PBR_PT_SPP if tracer_config.PBR_ENABLED else 1024]:
             edited_gaussians.savePathTracingResultsOnCameras(
                 cameras=cameras_to_render,
                 tracer_config=tracer_config,
                 spp=spp,
-                bounce_limit=7,
+                bounce_limit=(
+                    tracer_config.PBR_PT_BOUNCE_LIMIT
+                    if tracer_config.PBR_ENABLED
+                    else 7
+                ),
                 folder_path=tracer_config.OUTPUT_FOLDER_PATH
                 / f"2-pathtracing-spp{spp}",
             )
@@ -77,6 +79,24 @@ def main(tracer_config: TracerConfig):
             path=tracer_config.EAG_PLY_PATH
         )
 
+        edited_gaussians = gaussians
+
+    # [900 - PBR validation with every emitter disabled]
+    if tracer_config.I_SCENE_EDITING_SCENARIO == 900:
+        gaussians = EmissionAwareGaussians.LoadPly(path=tracer_config.EAG_PLY_PATH)
+        gaussians.emissives.zero_()
+        edited_gaussians = gaussians
+
+    # [901 - PBR validation with a warmer, stronger emitter]
+    if tracer_config.I_SCENE_EDITING_SCENARIO == 901:
+        gaussians = EmissionAwareGaussians.LoadPly(path=tracer_config.EAG_PLY_PATH)
+        selected_emitters = gaussians.emissives[:, 0] > EMISSION_THRESHOLD
+        warm_multiplier = torch.tensor(
+            [1.5, 0.6, 0.25],
+            dtype=gaussians.radiances.dtype,
+            device=gaussians.radiances.device,
+        )
+        gaussians.radiances[selected_emitters] *= warm_multiplier
         edited_gaussians = gaussians
 
     # [100 - Blender-kitchen turning off all lights, and insert the lightball]
@@ -984,14 +1004,44 @@ def main(tracer_config: TracerConfig):
         # [common]
         cameras_to_render = nvs_dataset.test_set_cameras
         if tracer_config.PBR_ENABLED:
-            # Keep PBR validation bounded to two deterministic held-out views.
-            cameras_to_render = [
-                nvs_dataset.test_set_cameras[0],
-                nvs_dataset.test_set_cameras[len(nvs_dataset.test_set_cameras) // 2],
-            ]
+            cameras_by_frame = {}
+            for camera in nvs_dataset.test_set_cameras:
+                frame_name = str(camera.name).replace("\\", "/").split("/")[-1]
+                try:
+                    cameras_by_frame[int(frame_name.split("-")[0])] = camera
+                except ValueError:
+                    continue
+            if 0 in cameras_by_frame and 200 in cameras_by_frame:
+                cameras_to_render = [cameras_by_frame[0], cameras_by_frame[200]]
+            else:
+                ExLog(
+                    "Could not resolve original frame 0/200; using first/middle test views.",
+                    "WARNING",
+                )
+                cameras_to_render = [
+                    nvs_dataset.test_set_cameras[0],
+                    nvs_dataset.test_set_cameras[
+                        len(nvs_dataset.test_set_cameras) // 2
+                    ],
+                ]
         RenderAndSave0Bounce1BouncePathTracingResults(
             edited_gaussians=edited_gaussians,
             cameras_to_render=cameras_to_render,
+            render_0_bounce=(
+                tracer_config.PBR_PT_RENDER_NOBOUNCE
+                if tracer_config.PBR_ENABLED
+                else True
+            ),
+            render_1_bounce=(
+                tracer_config.PBR_PT_RENDER_SINGLEBOUNCE
+                if tracer_config.PBR_ENABLED
+                else True
+            ),
+            render_path_tracing=(
+                tracer_config.PBR_PT_RENDER_PATH_TRACING
+                if tracer_config.PBR_ENABLED
+                else True
+            ),
             # cameras_to_render=nvs_dataset.train_set_cameras[63-1],  # for FR-classroom Teaser
         )
     else:

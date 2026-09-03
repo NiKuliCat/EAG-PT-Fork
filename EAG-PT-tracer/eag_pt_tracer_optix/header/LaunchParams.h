@@ -18,6 +18,12 @@ namespace osc
 
         int SPP;          // for reflection and emission
         int BOUNCE_LIMIT; // for emission
+        int pbr_pt_use_disney_sampling;
+        int pbr_pt_use_nee;
+        int pbr_pt_use_mis;
+        int pbr_pt_use_russian_roulette;
+        int pbr_pt_rr_start_bounce;
+        int pbr_pt_light_samples;
 
         // [input - surfels]
 
@@ -39,6 +45,7 @@ namespace osc
         const int *emissive_surfels_ids;
         const float *emissive_surfels_proportions_pdfs;
         const float *emissive_surfels_proportions_cdfs;
+        const float *surfels_emissive_selection_pdfs;
 
         // [input - rays]
 
@@ -60,6 +67,10 @@ namespace osc
         float *pixels_metallics;
         // values end
         float3 *pixels_rendering_radiances;
+        float3 *pixels_direct_radiances;
+        float3 *pixels_indirect_radiances;
+        float3 *pixels_emission_radiances;
+        float *pixels_shadow_visibilities;
         float3 *pixels_d_rendering_radiances_d_P;
 
         // [backward input - no bounce]

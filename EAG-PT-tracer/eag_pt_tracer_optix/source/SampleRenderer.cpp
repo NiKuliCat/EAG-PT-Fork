@@ -848,6 +848,12 @@ namespace osc
       int WIDTH,
       int BOUNCE_LIMIT,
       int SPP,
+      bool use_disney_sampling,
+      bool use_nee,
+      bool use_mis,
+      bool use_russian_roulette,
+      int rr_start_bounce,
+      int light_samples,
       // [input - surfels]
       uintptr_t ptr_surfels_positions,
       uintptr_t ptr_surfels_scales,
@@ -859,12 +865,22 @@ namespace osc
       uintptr_t ptr_surfels_albedos,
       uintptr_t ptr_surfels_roughnesses,
       uintptr_t ptr_surfels_metallics,
+      // emitter sampling
+      int emissive_surfels_count,
+      uintptr_t ptr_emissive_surfels_ids,
+      uintptr_t ptr_emissive_surfels_proportions_pdfs,
+      uintptr_t ptr_emissive_surfels_proportions_cdfs,
+      uintptr_t ptr_surfels_emissive_selection_pdfs,
       // values end
       // [input - rays]
       uintptr_t ptr_rays_origins,
       uintptr_t ptr_rays_directions,
       // [output - results]
-      uintptr_t ptr_rendering_radiances)
+      uintptr_t ptr_rendering_radiances,
+      uintptr_t ptr_direct_radiances,
+      uintptr_t ptr_indirect_radiances,
+      uintptr_t ptr_emission_radiances,
+      uintptr_t ptr_shadow_visibilities)
   {
     // [choose raygen]
 
@@ -878,6 +894,12 @@ namespace osc
 
     launchParams.SPP = SPP;
     launchParams.BOUNCE_LIMIT = BOUNCE_LIMIT;
+    launchParams.pbr_pt_use_disney_sampling = use_disney_sampling ? 1 : 0;
+    launchParams.pbr_pt_use_nee = use_nee ? 1 : 0;
+    launchParams.pbr_pt_use_mis = use_mis ? 1 : 0;
+    launchParams.pbr_pt_use_russian_roulette = use_russian_roulette ? 1 : 0;
+    launchParams.pbr_pt_rr_start_bounce = rr_start_bounce;
+    launchParams.pbr_pt_light_samples = light_samples;
 
     // [input - surfels]
 
@@ -891,6 +913,11 @@ namespace osc
     launchParams.surfels_albedos = reinterpret_cast<const float3 *>(ptr_surfels_albedos);
     launchParams.surfels_roughnesses = reinterpret_cast<const float *>(ptr_surfels_roughnesses);
     launchParams.surfels_metallics = reinterpret_cast<const float *>(ptr_surfels_metallics);
+    launchParams.emissive_surfels_count = emissive_surfels_count;
+    launchParams.emissive_surfels_ids = reinterpret_cast<const int *>(ptr_emissive_surfels_ids);
+    launchParams.emissive_surfels_proportions_pdfs = reinterpret_cast<const float *>(ptr_emissive_surfels_proportions_pdfs);
+    launchParams.emissive_surfels_proportions_cdfs = reinterpret_cast<const float *>(ptr_emissive_surfels_proportions_cdfs);
+    launchParams.surfels_emissive_selection_pdfs = reinterpret_cast<const float *>(ptr_surfels_emissive_selection_pdfs);
 
     // [input - rays]
 
@@ -900,6 +927,10 @@ namespace osc
     // [output - results]
 
     launchParams.pixels_rendering_radiances = reinterpret_cast<float3 *>(ptr_rendering_radiances);
+    launchParams.pixels_direct_radiances = reinterpret_cast<float3 *>(ptr_direct_radiances);
+    launchParams.pixels_indirect_radiances = reinterpret_cast<float3 *>(ptr_indirect_radiances);
+    launchParams.pixels_emission_radiances = reinterpret_cast<float3 *>(ptr_emission_radiances);
+    launchParams.pixels_shadow_visibilities = reinterpret_cast<float *>(ptr_shadow_visibilities);
 
     // [load launchParams]
 

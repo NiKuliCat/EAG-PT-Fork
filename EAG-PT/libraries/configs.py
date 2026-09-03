@@ -67,6 +67,20 @@ class TracerConfig(BaseConfig):
         self.PBR_LAMBDA_RENDER: float = 0.1
         self.PBR_LAMBDA_SMOOTH: float = 0.05
 
+        # [PBR path tracing]
+        self.PBR_PT_USE_DISNEY_SAMPLING: bool = True
+        self.PBR_PT_USE_NEE: bool = True
+        self.PBR_PT_USE_MIS: bool = True
+        self.PBR_PT_USE_RUSSIAN_ROULETTE: bool = True
+        self.PBR_PT_RR_START_BOUNCE: int = 3
+        self.PBR_PT_LIGHT_SAMPLES: int = 1
+        self.PBR_PT_SAVE_DECOMPOSITION: bool = True
+        self.PBR_PT_SPP: int = 1024
+        self.PBR_PT_BOUNCE_LIMIT: int = 7
+        self.PBR_PT_RENDER_NOBOUNCE: bool = True
+        self.PBR_PT_RENDER_SINGLEBOUNCE: bool = True
+        self.PBR_PT_RENDER_PATH_TRACING: bool = True
+
         # [training]
 
         # self.ITERATION: int = 6400
