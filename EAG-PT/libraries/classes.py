@@ -2686,16 +2686,8 @@ class EmissionAwareGaussians:
                     image_shadow, path=folder_path / f"{frame_id}_shadow.exr"
                 )
                 material_basecolor, material_roughness, material_metallic = (
-                    EAG_OptiX_materialpass.apply(
-                        camera,
-                        sample_renderer,
-                        self.positions,
-                        self.scales,
-                        self.quaternions,
-                        self.opacities,
-                        self.albedos,
-                        self.roughnesses,
-                        self.metallics,
+                    Differentiable_EAG_OptiX_materialpass(
+                        camera, sample_renderer, self
                     )
                 )
                 UTILITIES_IO.SaveExrImage(
