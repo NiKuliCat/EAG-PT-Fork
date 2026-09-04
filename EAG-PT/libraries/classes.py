@@ -1656,6 +1656,7 @@ class EmissionAwareGaussians:
     @torch.no_grad()
     def buildEmitterSamplingDistribution(
         self,
+        emissive_threshold: float = 0.1,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the power-weighted emitter distribution used by P4 NEE."""
         gaussian_z = 1.0 - math.exp(-0.5 * 3.0 * 3.0)
@@ -1677,7 +1678,11 @@ class EmissionAwareGaussians:
             * self.opacities[:, 0].clamp(0.0, 1.0)
             * effective_area
         )
-        valid = torch.isfinite(powers) & (powers > 0.0)
+        valid = (
+            torch.isfinite(powers)
+            & (powers > 0.0)
+            & (self.emissives[:, 0] > emissive_threshold)
+        )
         emitter_ids = torch.nonzero(valid, as_tuple=False)[:, 0].to(torch.int32)
         reverse_pdf = torch.zeros(
             (self.count,), dtype=torch.float32, device=self.positions.device
@@ -2545,10 +2550,13 @@ class EmissionAwareGaussians:
         )
 
         emitter_ids, emitter_pdf, emitter_cdf, reverse_emitter_pdf = (
-            self.buildEmitterSamplingDistribution()
+            self.buildEmitterSamplingDistribution(
+                emissive_threshold=tracer_config.PBR_PT_EMITTER_THRESHOLD
+            )
         )
         ExLog(
-            f"P4 emitter distribution contains {emitter_ids.numel()} surfels."
+            f"P4 emitter distribution contains {emitter_ids.numel()} surfels "
+            f"above threshold {tracer_config.PBR_PT_EMITTER_THRESHOLD}."
         )
 
         # [records]

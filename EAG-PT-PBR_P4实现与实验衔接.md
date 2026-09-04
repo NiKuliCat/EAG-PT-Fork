@@ -8,6 +8,7 @@
 
 - Disney diffuse/GGX 混合采样；
 - power-weighted emitter CDF；
+- emissive 大于 `0.1` 的 Gaussian 才进入 emitter CDF；
 - 截断到 3 sigma 的二维 Gaussian emitter 采样；
 - emitter next-event estimation；
 - Gaussian shadow transmittance；

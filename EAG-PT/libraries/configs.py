@@ -74,6 +74,7 @@ class TracerConfig(BaseConfig):
         self.PBR_PT_USE_RUSSIAN_ROULETTE: bool = True
         self.PBR_PT_RR_START_BOUNCE: int = 3
         self.PBR_PT_LIGHT_SAMPLES: int = 1
+        self.PBR_PT_EMITTER_THRESHOLD: float = 0.1
         self.PBR_PT_SAVE_DECOMPOSITION: bool = True
         self.PBR_PT_SPP: int = 1024
         self.PBR_PT_BOUNCE_LIMIT: int = 7
