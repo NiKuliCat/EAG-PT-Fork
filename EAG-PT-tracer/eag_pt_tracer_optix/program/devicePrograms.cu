@@ -587,21 +587,9 @@ namespace osc
     {
         if (maximum_distance <= MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION)
             return 0.0f;
-
-        // A shadow segment starts on one Gaussian surface and ends on another.
-        // Using the generic intersection epsilon here makes the overlapping
-        // Gaussians around both endpoints shadow themselves. Match secondary
-        // rays' surface clearance, while retaining an interior segment for
-        // short light connections.
-        const float endpoint_margin = fminf(
-            NEAREST_DISTANCE_TO_AVOID_FRONT_SURFELS,
-            maximum_distance * 0.25f);
-        const float tmax = maximum_distance - endpoint_margin;
-        if (tmax <= endpoint_margin)
-            return 1.0f;
-
         float transmittance = 1.0f;
-        float tmin = endpoint_margin;
+        float tmin = MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION;
+        const float tmax = maximum_distance - MINIMAL_DISTANCE_TO_AVOID_SELF_INTERSECTION;
         bool ended = false;
         while (!ended && tmin < tmax)
         {
